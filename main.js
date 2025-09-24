@@ -1,274 +1,273 @@
-import { Actor, log } from 'apify';
+// Apify v3 style
+import { Actor, Dataset, log } from 'apify';
 import { chromium } from 'playwright';
 
-/** Utility: wait a bit */
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const START_URL = 'https://www.bioladen.de/bio-haendler-suche';
 
-/** Extract clean text helper */
-const t = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
+// Utility: sleep
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
-/** Parse address lines into structured fields */
-function parseAddress(raw) {
-  const out = { strasse: null, plz: null, ort: null };
-  if (!raw) return out;
-  const line = raw.replace(/\s+/g, ' ').trim();
-  const m = line.match(/(.*?),\s*(\d{5})\s+([^,]+)/);
-  if (m) {
-    out.strasse = m[1].trim();
-    out.plz = m[2];
-    out.ort = m[3].trim();
-  } else {
-    // Fallback: try splitting on line breaks or commas
-    const parts = line.split(/,|\n/).map(s => s.trim()).filter(Boolean);
-    if (parts.length >= 2) {
-      const m2 = parts[1].match(/(\d{5})\s+(.+)/);
-      if (m2) {
-        out.strasse = parts[0];
-        out.plz = m2[1];
-        out.ort = m2[2];
-      } else {
-        out.strasse = parts[0];
-        out.ort = parts.slice(1).join(', ');
-      }
-    } else {
-      out.strasse = line;
-    }
-  }
-  return out;
-}
-
-/** Ensure the cookie banner is accepted (idempotent) */
-async function acceptCookies(page) {
+async function acceptCookiesOnce(page) {
   try {
-    // Usercentrics variants
-    const sel = [
+    // Try several common cookie selectors
+    const btns = [
+      'button#onetrust-accept-btn-handler',
+      'button[aria-label*="Akzeptieren"]',
       'button:has-text("Akzeptieren")',
-      'button:has-text("Einverstanden")',
       'button:has-text("Alle akzeptieren")',
-      '#usercentrics-accept-button',
-      '[data-testid="uc-accept-all-button"]'
-    ].join(', ');
-    const btn = page.locator(sel).first();
-    if (await btn.count()) {
-      await btn.click({ timeout: 3000 });
-      log.info('Cookie-Banner akzeptiert.');
-      await sleep(300);
+      '.cookiebar button.accept, .cm-btn-accept'
+    ];
+    for (const sel of btns) {
+      const b = await page.locator(sel).first();
+      if (await b.count()) {
+        await b.click({ timeout: 3000 }).catch(()=>{});
+        log.info('Cookie-Banner akzeptiert.');
+        break;
+      }
     }
-  } catch { /* ignore */ }
+  } catch {}
 }
 
-/** Enforce radius=50 and set postal code via DOM, then submit */
-async function setZipAndRadiusAndSearch(page, zip, radiusKm) {
-  await page.waitForLoadState('domcontentloaded', { timeout: 20000 });
-  await acceptCookies(page);
+// Sets ZIP + radius in DOM and submits; wraps args into one object for page.evaluate
+async function setZipAndRadiusAndSearch(page, { zip, radius }) {
+  // Query approach — navigate with params as well (fast path, improves consistency)
+  const url = `${START_URL}?tx_biohandel_plg[searchplz]=${encodeURIComponent(zip)}&tx_biohandel_plg[distance]=${encodeURIComponent(String(radius))}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-  await page.evaluate((zipArg, radiusArg) => {
-    // set PLZ
-    const zipInput = document.querySelector(
-      'input[name*="searchplz"], input[placeholder*="PLZ"], input[aria-label*="Postleitzahl"], input[type="text"]'
-    );
+  // DOM approach to enforce radius + trigger search
+  await page.evaluate(({ zip, radius }) => {
+    const doc = document;
+
+    // ZIP input
+    const zipInput = doc.querySelector('input[name*="searchplz"], input[placeholder*="PLZ"], input[type="search"], input[type="text"]');
     if (zipInput) {
-      zipInput.focus();
-      zipInput.value = '';
-      zipInput.value = zipArg;
+      zipInput.value = String(zip);
       zipInput.dispatchEvent(new Event('input', { bubbles: true }));
       zipInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    // set radius
-    const radius = document.querySelector('select[name*="distance"], select#distance');
-    if (radius) {
-      radius.value = String(radiusArg);
-      radius.dispatchEvent(new Event('input', { bubbles: true }));
-      radius.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    // ensure categories ON if present
-    const checkIfExistsThenCheck = (labelText) => {
-      const label = Array.from(document.querySelectorAll('label')).find(l => (l.textContent||'').match(new RegExp(labelText, 'i')));
-      if (label) {
-        const input = label.querySelector('input[type="checkbox"]');
-        if (input && !input.checked) {
-          input.click();
-        }
-      }
-    };
-    checkIfExistsThenCheck('Bioläden');
-    checkIfExistsThenCheck('Marktstände');
-    checkIfExistsThenCheck('Lieferservice');
 
-    // submit form
-    const form = document.querySelector('form[action*="bio-haendler-suche"]') || document.querySelector('form');
-    let submit = form?.querySelector('button[type="submit"], input[type="submit"]');
-    if (!submit) {
-      submit = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(b => /suchen|finden/i.test(b.textContent||''));
-    }
-    if (submit) submit.click();
-  }, zip, radiusKm);
-
-  // wait for results area presence/update
-  const resultsRoot = page.locator('.biohaendler-suche, .tx-biohandel, .results, .container').first();
-  await resultsRoot.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-}
-
-/** Collect all "Details" buttons across categories */
-async function findDetailButtons(page) {
-  // try direct button/anchor text match
-  let loc = page.locator('button:has-text("Details"), a:has-text("Details")');
-  let cnt = await loc.count();
-  if (cnt > 0) return loc;
-
-  // fallback: any element that looks like a details trigger
-  loc = page.locator('[data-bs-toggle="modal"], [data-toggle="modal"], .modal-trigger, .btn:has-text("Details")');
-  cnt = await loc.count();
-  if (cnt > 0) return loc;
-
-  // final fallback: try to click cards sequentially (not ideal, but safer)
-  return page.locator('.card, .result-item, .store-result').locator('button, a');
-}
-
-/** Extract one modal */
-async function extractFromOpenModal(page, sourceZip) {
-  const modal = page.locator('.modal.show, [role="dialog"][aria-modal="true"]').first();
-  await modal.waitFor({ state: 'visible', timeout: 10000 });
-
-  // Name: prefer modal title
-  let name = await modal.locator('h3, h4, .modal-title, .h3, .h4').first().textContent().catch(() => '');
-  name = (name || '').replace(/\s+/g, ' ').trim();
-
-  // Gather all text once for robust parsing
-  const text = (await modal.textContent() || '').replace(/\s+/g, ' ').trim();
-
-  // Adresse: try explicit fields or lines
-  let addressLine = '';
-  const addrNode = await modal.locator('.address, .adresse, address').first().textContent().catch(() => '');
-  addressLine = (addrNode || '').trim();
-  if (!addressLine) {
-    // try to locate street + zip lines by regex in full text
-    const m = text.match(/([^\n,]+?),\s*(\d{5})\s+([A-Za-zÄÖÜäöüß\-\s]+)/);
-    if (m) addressLine = `${m[1]}, ${m[2]} ${m[3]}`;
-  }
-  const { strasse, plz, ort } = parseAddress(addressLine);
-
-  // Telefon
-  let telefon = '';
-  const phoneCandidate = text.match(/(?:Tel\.?|Telefon)\s*:?\s*([+\d][\d\s\-/()]+)(?!\S)/i);
-  if (phoneCandidate) telefon = phoneCandidate[1].trim();
-
-  // E-Mail
-  let email = '';
-  const emailNode = await modal.locator('a[href^="mailto:"]').first().getAttribute('href').catch(() => null);
-  if (emailNode) email = emailNode.replace(/^mailto:/i, '').trim();
-  if (!email) {
-    const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    if (m) email = m[0];
-  }
-
-  // Website
-  let web = '';
-  const webHref = await modal.locator('a[href^="http"]').first().getAttribute('href').catch(() => null);
-  if (webHref) web = webHref.trim();
-
-  // Öffnungszeiten (grober Block)
-  let oeffnungszeiten = '';
-  const oh = text.match(/Öffnungszeiten[:\s]*([^]*?)(?:Kontakt|Telefon|E-Mail|Web|Website|$)/i);
-  if (oh) oeffnungszeiten = oh[1].trim();
-
-  // Kategorie: aus Modal-Labels ableiten
-  let kategorie = '';
-  const catHit = text.match(/Bioläden|Marktstände|Lieferservice/i);
-  if (catHit) kategorie = catHit[0];
-
-  return {
-    name: name || null,
-    kategorie: kategorie || null,
-    strasse: strasse || null,
-    plz: plz || null,
-    ort: ort || null,
-    telefon: telefon || null,
-    email: email || null,
-    web: web || null,
-    oeffnungszeiten: oeffnungszeiten || null,
-    lat: null,
-    lng: null,
-    sourceZip: String(sourceZip),
-  };
-}
-
-async function runOnce(browser, zip, radiusKm, dataset, dedupSet) {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-
-  // Pre-seed URL with query args (helps server-side filter)
-  const url = `https://www.bioladen.de/bio-haendler-suche?tx_biohandel_plg[searchplz]=${zip}&tx_biohandel_plg[distance]=${radiusKm}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-
-  await setZipAndRadiusAndSearch(page, zip, radiusKm);
-
-  // Collect details buttons
-  const details = await findDetailButtons(page);
-  const total = await details.count();
-  log.info(`DETAILS buttons: ${total}`);
-
-  let saved = 0;
-  for (let i = 0; i < total; i++) {
-    try {
-      const btn = details.nth(i);
-      await btn.scrollIntoViewIfNeeded().catch(() => {});
-      await btn.click({ timeout: 8000 });
-      const rec = await extractFromOpenModal(page, zip);
-
-      // dedup key by name+strasse+plz
-      const key = [rec.name||'', rec.strasse||'', rec.plz||''].join('|').toLowerCase();
-      if (!dedupSet.has(key)) {
-        dedupSet.add(key);
-        await dataset.pushData(rec);
-        saved++;
-      }
-
-      // Close modal
-      const closeBtn = page.locator('.modal.show button:has-text("Schließen"), .modal.show button.btn-close').first();
-      if (await closeBtn.count()) {
-        await closeBtn.click({ timeout: 3000 }).catch(() => page.keyboard.press('Escape').catch(()=>{}));
+    // Radius select (typ. name contains [distance])
+    const radSel = doc.querySelector('select[name*="distance"], select[id*="distance"]');
+    if (radSel) {
+      // try exact value, else fallback to option containing 50
+      const wanted = String(radius);
+      let set = false;
+      if ([...radSel.options].some(o => o.value === wanted)) {
+        radSel.value = wanted;
+        set = true;
       } else {
-        await page.keyboard.press('Escape').catch(()=>{});
+        const opt = [...radSel.options].find(o => /50/.test(o.value) || /50/.test(o.textContent || ''));
+        if (opt) { radSel.value = opt.value; set = true; }
       }
-      await sleep(120);
-    } catch (e) {
-      // try to recover modal state
+      if (set) {
+        radSel.dispatchEvent(new Event('input', { bubbles: true }));
+        radSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+
+    // Kategorien aktivieren: Bioläden / Marktstände / Lieferservice (wenn vorhanden)
+    const catLabels = ['Bioläden', 'Marktstände', 'Lieferservice'];
+    catLabels.forEach(lbl => {
+      // find checkbox by label text or id->label[for]
+      const label = [...doc.querySelectorAll('label')].find(l => (l.textContent||'').trim().toLowerCase().includes(lbl.toLowerCase()));
+      let cb = null;
+      if (label) {
+        const forId = label.getAttribute('for');
+        if (forId) cb = doc.getElementById(forId);
+        if (!cb) cb = label.querySelector('input[type="checkbox"]');
+      }
+      if (!cb) {
+        cb = [...doc.querySelectorAll('input[type="checkbox"]')].find(i => (i.name||'').toLowerCase().includes(lbl.toLowerCase()));
+      }
+      if (cb && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('input', { bubbles: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+
+    // Try clicking a visible submit/search button
+    const submit =
+      doc.querySelector('button[type="submit"]') ||
+      [...doc.querySelectorAll('button')].find(b => /suchen|finden/i.test(b.textContent||''));
+    if (submit) {
+      submit.click();
+    } else if (zipInput && zipInput.form) {
+      zipInput.form.requestSubmit ? zipInput.form.requestSubmit() : zipInput.form.submit();
+    }
+  }, { zip, radius });
+
+  // wait for results container (cards) to appear or update
+  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(()=>{});
+}
+
+function parseAddress(raw) {
+  // Try to split into Straße, PLZ, Ort. Common patterns like "Musterweg 1, 20095 Hamburg"
+  let strasse = '', plz = '', ort = '';
+  if (!raw) return { strasse, plz, ort };
+  const txt = raw.replace(/\s+/g,' ').trim();
+  const m = txt.match(/^(.*?),(?:\s*)(\d{5})\s+(.*)$/);
+  if (m) {
+    strasse = m[1].trim();
+    plz = m[2];
+    ort = m[3].trim();
+  } else {
+    // fallback: last token 5-digit is plz
+    const m2 = txt.match(/(\d{5})/);
+    if (m2) {
+      plz = m2[1];
+      const parts = txt.split(m2[1]);
+      strasse = parts[0].replace(/[,;]+$/,'').trim();
+      ort = (parts[1]||'').replace(/^\s*[,;-]?\s*/,'').trim();
+    } else {
+      strasse = txt;
+    }
+  }
+  return { strasse, plz, ort };
+}
+
+function uniqKey(item) {
+  return `${(item.name||'').toLowerCase()}|${(item.strasse||'').toLowerCase()}|${item.plz||''}`;
+}
+
+async function extractAllModalsOnPage(page, sourcePlz) {
+  // Find all "DETAILS" buttons by text; if not found, fallback to card links
+  const buttonLoc = page.locator('button:has-text("Details"), a:has-text("Details")');
+  const count = await buttonLoc.count();
+  log.info(`DETAILS buttons: ${count}`);
+  const seen = new Set();
+  const out = [];
+
+  for (let i = 0; i < count; i++) {
+    // re-resolve each time to avoid stale handles
+    const btn = page.locator('button:has-text("Details"), a:has-text("Details")').nth(i);
+    await btn.scrollIntoViewIfNeeded().catch(()=>{});
+    await btn.click({ timeout: 8000 }).catch(()=>{});
+
+    // Wait for modal/dialog
+    const modal = page.locator('div[role="dialog"], .modal, .modal-dialog').first();
+    await modal.waitFor({ state: 'visible', timeout: 8000 }).catch(()=>{});
+
+    // Grab modal text and structured fields
+    const text = (await modal.textContent())?.replace(/\s+/g,' ').trim() || '';
+
+    // Try to get name/title
+    let name = await modal.locator('h1, h2, h3, .modal-title').first().textContent().catch(()=>null);
+    if (name) name = name.replace(/\s+/g,' ').trim();
+
+    // Kategorie: oft im Modal-Kopf (Fallback: leere Kategorie)
+    let kategorie = '';
+    const catCandidate = await modal.locator('header, .modal-header').first().textContent().catch(()=>null);
+    if (catCandidate) {
+      const c = catCandidate.replace(/\s+/g,' ').trim();
+      const hit = /(Bioläden|Marktstände|Lieferservice)/i.exec(c);
+      if (hit) kategorie = hit[1];
+    }
+    if (!kategorie) {
+      // try to infer from surrounding card text
+      const near = await btn.locator('..').textContent().catch(()=>'');
+      const c2 = (near||'').replace(/\s+/g,' ').trim();
+      const hit2 = /(Bioläden|Marktstände|Lieferservice)/i.exec(c2);
+      if (hit2) kategorie = hit2[1];
+    }
+
+    // Address: try common container classes or first <p>
+    let addressRaw = await modal.locator('.address, .kontakt, .contact, p').first().textContent().catch(()=>null);
+    addressRaw = (addressRaw||'').replace(/\s+/g,' ').trim();
+    const { strasse, plz, ort } = parseAddress(addressRaw);
+
+    // Phone, email, website
+    const phoneMatch = text.match(/(?:Tel\.?|Telefon)[:\s]*([+\d][\d\s\-/()]+)\b/i);
+    const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    const urlMatch = text.match(/https?:\/\/[^\s)]+/i);
+
+    // Öffnungszeiten: grab block after "Öffnungszeiten"
+    let oeff = '';
+    const idx = text.toLowerCase().indexOf('öffnungszeiten');
+    if (idx >= 0) oeff = text.slice(idx, Math.min(text.length, idx + 300))
+      .replace(/\s+/g,' ').replace(/^öffnungszeiten[:\s]*/i,'').trim();
+
+    const item = {
+      name: name || '',
+      kategorie: kategorie || '',
+      strasse, plz, ort,
+      telefon: phoneMatch ? phoneMatch[1].trim() : '',
+      email: emailMatch ? emailMatch[0].trim() : '',
+      website: urlMatch ? urlMatch[0].trim() : '',
+      oeffnungszeiten: oeff,
+      source_plz: sourcePlz
+    };
+
+    const key = uniqKey(item);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(item);
+    }
+
+    // close modal
+    const closeBtn = modal.locator('button:has-text("Schließen"), button[aria-label*="Schließen"], .close, .mfp-close');
+    if (await closeBtn.count()) {
+      await closeBtn.first().click().catch(()=>{});
+    } else {
+      // try Escape
       await page.keyboard.press('Escape').catch(()=>{});
     }
+
+    // brief wait to allow DOM to settle
+    await wait(150);
   }
 
-  await context.close().catch(()=>{});
-  return saved;
+  return out;
 }
 
-await Actor.main(async () => {
+Actor.main(async () => {
   const input = await Actor.getInput() || {};
-  const radiusKm = Number(input.radiusKm ?? 50);
-  let postalCodes = input.postalCodes;
+  const radius = Number(input.radiusKm || 50);
+  let postalCodes = Array.isArray(input.postalCodes) && input.postalCodes.length ? input.postalCodes : null;
   if (!postalCodes) {
     try {
-      postalCodes = JSON.parse(await Actor.getValue('plz_full.json'));
-    } catch {
-      postalCodes = null;
-    }
+      const { postalCodes: fromFile } = JSON.parse(await Actor.getValue('plz_full.json') || '{}');
+      if (Array.isArray(fromFile) && fromFile.length) postalCodes = fromFile;
+    } catch {}
   }
   if (!postalCodes) {
-    postalCodes = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('./plz_full.json', import.meta.url)));
+    postalCodes = ["20095","80331","50667","60311","70173"];
   }
+
   log.info(`PLZ in Lauf: ${postalCodes.length} (aus plz_full.json)`);
 
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const dataset = await Actor.openDataset();
-  const dedupSet = new Set();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--disable-dev-shm-usage', '--no-sandbox']
+  });
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+
+  // First open base to accept cookies once
+  await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+  await acceptCookiesOnce(page);
+
+  let totalSaved = 0;
 
   for (let i = 0; i < postalCodes.length; i++) {
-    const zip = String(postalCodes[i]).padStart(5, '0');
+    const zip = String(postalCodes[i]);
     log.info(`=== ${i+1}/${postalCodes.length} | PLZ ${zip} ===`);
-    const saved = await runOnce(browser, zip, radiusKm, dataset, dedupSet);
-    log.info(`PLZ ${zip}: ${saved} neue Datensätze gespeichert`);
+    try {
+      await setZipAndRadiusAndSearch(page, { zip, radius });
+      // give the site a moment to render result cards
+      await wait(800);
+      const items = await extractAllModalsOnPage(page, zip);
+      if (items.length) {
+        await Dataset.pushData(items);
+        totalSaved += items.length;
+      }
+      log.info(`PLZ ${zip}: ${items.length} neue Datensätze gespeichert`);
+    } catch (e) {
+      log.warning(`PLZ ${zip} Fehler: ${e.message}`);
+    }
   }
+
+  log.info(`Fertig. Insgesamt gespeichert: ${totalSaved}`);
 
   await browser.close();
 });

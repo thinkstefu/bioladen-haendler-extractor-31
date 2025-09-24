@@ -1,18 +1,22 @@
-# Bioladen Händler Extractor
+# bioladen-haendler-extractor
 
-- **Start-URL:** https://www.bioladen.de/bio-haendler-suche
-- **Vorgehen:** Einmalige Navigation, Cookie-Banner akzeptieren, PLZ + Radius=50 km setzen,
-  alle Kategorien (Bioläden, Marktstände, Lieferservice) aktivieren, dann alle `Details`-Modals öffnen
-  und Daten extrahieren.
-- **Input (optional):**
+Extrahiert Händlerdaten von **bioladen.de** über die Suche (PLZ + Radius 50km). Klickt pro Ergebnis auf **DETAILS** und speichert strukturierte Felder.
+
+## Input
+Optional via Actor-Input:
 ```json
 {
   "postalCodes": ["20095","80331","50667","60311","70173"],
   "radiusKm": 50
 }
 ```
-- **Output:** Apify Dataset (JSON/CSV), Felder: `name, kategorie, strasse, plz, ort, telefon, email, web, oeffnungszeiten, lat, lng, sourceZip`
+Wenn leer, wird `plz_full.json` genutzt.
 
-## Apify Build
-Actor kann ohne eigenes Browser-Install gebaut werden (Chrome ist im Base-Image vorhanden).
+## Output (Dataset)
+Felder:
+- name, kategorie, strasse, plz, ort, telefon, email, website, oeffnungszeiten, source_plz
 
+## Hinweise
+- Cookie-Banner wird nur einmal akzeptiert.
+- Kategorien **Bioläden**, **Marktstände** und **Lieferservice** werden (falls vorhanden) aktiviert.
+- Radius wird **quer** gesetzt: Query-Parameter, Select-Feld + `change` + Formular-Submit.

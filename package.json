@@ -1,9 +1,8 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.1.0",
+  "version": "4.1.1",
+  "description": "Extrahiert Bioladen.de-H\u00e4ndler (Biol\u00e4den, Marktst\u00e4nde, Lieferservice) via PLZ+Radius 50km.",
   "type": "module",
-  "description": "Extrahiert Bioladen-H\u00e4ndler via PLZ+Radius aus bioladen.de",
-  "main": "main.js",
   "scripts": {
     "start": "node main.js"
   },
