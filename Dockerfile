@@ -1,24 +1,17 @@
+# Apify base image with Playwright + Chrome (Node 20)
 FROM apify/actor-node-playwright-chrome:20
 
-# Workdir
+# Work directory
 WORKDIR /usr/src/app
 
-# Install deps as root to avoid EACCES, then switch to myuser
-USER root
-
+# Only copy package files first (better layer caching)
 COPY package*.json ./
 
-# No postinstall, no playwright install needed (base image has browsers)
-RUN npm install --omit=dev --no-audit --no-fund
+# Install production deps as root to avoid EACCES in CI
+RUN npm install --omit=dev --omit=optional --no-audit --no-fund
 
-# Copy app files
-COPY . ./
+# Copy the rest of the code
+COPY . .
 
-# Ensure runtime user owns files
-RUN chown -R myuser:myuser /usr/src/app
-
-# Drop privileges
-USER myuser
-
-# Start
+# Default command (Apify will override to "node main.js" if not present, but we keep it explicit)
 CMD ["node", "main.js"]

@@ -1,14 +1,17 @@
 {
   "name": "bioladen-haendler-extractor",
   "version": "5.0.0",
-  "description": "Extrahiert Bioläden/Marktstände/Lieferservices aus einer Händlersuche, gesteuert über PLZ-Liste.",
-  "main": "main.js",
-  "type": "commonjs",
+  "type": "module",
+  "private": true,
+  "description": "Robuster Apify Actor: H\u00e4ndler-Suche (Biol\u00e4den, Marktst\u00e4nde, Lieferservice) per PLZ mit 50-km-Umkreis \u2013 UI-first, mit Fallbacks.",
   "scripts": {
     "start": "node main.js"
   },
   "dependencies": {
     "apify": "^3.4.5",
     "playwright": "^1.55.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
