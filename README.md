@@ -1,22 +1,20 @@
-# bioladen-haendler-extractor (final)
+# Bioladen Händler Extractor (stabil)
 
-- Robust gegen Cookie-Banner
-- Setzt Radius *garantiert* auf 50 km (verifiziert)
-- Aktiviert alle Kategorien (Bioläden, Marktstände, Lieferservice), sofern Filter vorhanden sind
-- Extrahiert Name, Straße, PLZ, Ort, Telefon, E-Mail, Website, Kategorie, Öffnungszeiten, Rohtext
-- Füllt fehlende Felder mit `null`
-- Dedup anhand (name + plz + ort + strasse)
-- Läuft mit `apify/actor-node-playwright-chrome:20`
+Diese Version setzt sicher den 50‑km‑Radius, aktiviert optional die Kategorien (Bioläden, Marktstände, Lieferservice) und nutzt eine URL‑Fallback‑Strategie, falls die UI‑Selektoren nicht greifen. Die Ergebnisliste wird zuerst ausgelesen; Detailseiten werden nur geöffnet, wenn wesentliche Felder (z. B. Website) fehlen. Alle Felder werden mit `null` vorbelegt, damit die CSV keine Mix-Fragmente enthält.
 
-## Start
-```bash
-node main.js
-```
-
-## Input (optional)
+## Run-Optionen (Actor input)
 ```json
 {
-  "limit": 500,           // max. Anzahl PLZs (Default: alle)
-  "startIndex": 0         // Startindex in der PLZ-Liste (Default: 0)
+  "startIndex": 0,
+  "limit": 200,
+  "maxZips": null,
+  "headless": true
 }
 ```
+- `startIndex`/`limit`: Chunking über die PLZ-Liste `plz_full.json`
+- `maxZips`: maximal zu verarbeitende PLZ (kürzt die Liste)
+- `headless`: steuert den Browsermodus
+
+## Hinweis
+- Docker-Image: `apify/actor-node-playwright-chrome:20` (Browser bereits enthalten)
+- Keine `npx playwright install` nötig.
