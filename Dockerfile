@@ -1,18 +1,17 @@
 FROM apify/actor-node-playwright-chrome:20
 
-# Arbeitsverzeichnis & Rechte so setzen, dass npm ohne EACCES läuft
 USER root
 WORKDIR /usr/src/app
+RUN mkdir -p /usr/src/app && chown -R myuser:myuser /usr/src/app
 
-# Zuerst nur package-Dateien kopieren und als myuser besitzen lassen
+ENV NPM_CONFIG_CACHE=/home/myuser/.npm
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
 COPY --chown=myuser:myuser package*.json ./
-
-# Als nicht-root installieren, damit node_modules myuser gehören
 USER myuser
-RUN npm install --omit=dev --omit=optional --no-audit --no-fund
+RUN npm ci --omit=dev --omit=optional --no-audit --no-fund || \
+    npm install --omit=dev --omit=optional --no-audit --no-fund
 
-# Restliche Quellen kopieren
-COPY --chown=myuser:myuser . ./
+COPY --chown=myuser:myuser . .
 
-# Start
-CMD ["xvfb-run","-a","-s","-ac -screen 0 1920x1080x24+32 -nolisten tcp","node","main.js"]
+CMD ["node", "main.js"]

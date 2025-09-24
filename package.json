@@ -1,7 +1,9 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "5.0.0",
-  "type": "module",
+  "version": "4.2.0",
+  "description": "Extrahiert Bioläden, Marktstände und Lieferservices für gegebene PLZ mit 50 km Radius.",
+  "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node main.js"
   },

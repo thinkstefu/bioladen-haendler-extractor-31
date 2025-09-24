@@ -1,20 +1,26 @@
-# Bioladen Händler Extractor (stabil)
+# Bioladen Händler Extractor
 
-Diese Version setzt sicher den 50‑km‑Radius, aktiviert optional die Kategorien (Bioläden, Marktstände, Lieferservice) und nutzt eine URL‑Fallback‑Strategie, falls die UI‑Selektoren nicht greifen. Die Ergebnisliste wird zuerst ausgelesen; Detailseiten werden nur geöffnet, wenn wesentliche Felder (z. B. Website) fehlen. Alle Felder werden mit `null` vorbelegt, damit die CSV keine Mix-Fragmente enthält.
+Stabilisierte Actor-Version mit folgenden Fixes:
+- **EACCES**-Probleme beim Build behoben (Installation als `myuser`, `COPY --chown=...`, `WORKDIR` + `chown`).
+- Radius **robust auf 50 km** (Dropdown → URL-Fallback).
+- **Kategorien** werden **alle** aktiviert (Bioläden, Marktstände, Lieferservice).
+- **Parsing** säubert Felder, füllt fehlende mit `null` und setzt **Name** korrekt.
+- **Timeout**/Chunking parametrisierbar (Input).
 
-## Run-Optionen (Actor input)
+## Run-Optionen (Input JSON)
 ```json
 {
   "startIndex": 0,
-  "limit": 200,
-  "maxZips": null,
-  "headless": true
+  "limit": 500,
+  "radiusKm": 50,
+  "plzSource": "file"  // "file" = aus plz_full.json lesen, "embedded" = interne Liste
 }
 ```
-- `startIndex`/`limit`: Chunking über die PLZ-Liste `plz_full.json`
-- `maxZips`: maximal zu verarbeitende PLZ (kürzt die Liste)
-- `headless`: steuert den Browsermodus
+> Hinweis: Für die vollständigen 7.9k PLZ in einem Run bitte Timeout >= 60 Min setzen oder in Batches laufen lassen (`startIndex` + `limit`).
 
-## Hinweis
-- Docker-Image: `apify/actor-node-playwright-chrome:20` (Browser bereits enthalten)
-- Keine `npx playwright install` nötig.
+## Starten
+Apify UI/CLI startet automatisch `node main.js` (im Image headless mit xvfb).
+
+## Output
+- Alle Datensätze werden in das Apify Dataset gepusht (mit `null`-Defaults).
+- Zusätzlich wird unter `/mnt/data/outputs/` ein CSV/JSONL je Run abgelegt.

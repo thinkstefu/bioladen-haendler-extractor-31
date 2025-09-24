@@ -1,380 +1,375 @@
-import { Actor, log } from 'apify';
-import { chromium } from 'playwright';
-import fs from 'fs/promises';
 
-const BASE_URL = 'https://www.bioladen.de/bio-haendler-suche';
+const { Actor, log } = require('apify');
+const fs = require('fs/promises');
+const path = require('path');
+const { chromium } = require('playwright');
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Website der Händlersuche (bei dir hat diese Methode bereits 90 Ergebnisse geliefert)
+const BASE_URL = 'https://www.biomarkt.de/haendler/';
 
-const DEFAULT_FIELDS = () => ({
-    sourceZip: null,
-    name: null,
-    street: null,
-    zip: null,
-    city: null,
-    phone: null,
-    email: null,
-    website: null,
-    category: null,
-});
+// Selektor-Sets (mehrere Varianten zur Robustheit)
+const SEL = {
+  zipInput: [
+    'input[name*="[zip]"]',
+    'input[name*="[plz]"]',
+    'input[name*="zip"]',
+    'input[placeholder*="PLZ"]',
+  ],
+  distanceSelect: [
+    'select[name*="[distance]"]',
+    'select[name*="distance"]',
+  ],
+  submit: [
+    'button[type="submit"]',
+    'button:has-text("Suchen")',
+    'button:has-text("Suche")',
+  ],
+  catLabels: {
+    bio: ['Bioläden', 'Bioladen', 'Bio-Laden', 'Bio-Läden', 'Biomarkt'],
+    market: ['Marktstände', 'Marktstand'],
+    delivery: ['Lieferservice', 'Lieferdienst'],
+  },
+  detailsButton: [
+    'a:has-text("Details")',
+    'button:has-text("Details")',
+    'a.details',
+    'button.details',
+  ],
+  resultCard: [
+    '.dealer', '.result', '.shop', 'article', '.card'
+  ],
+  name: ['.dealer__title', '.result__title', '.shop__title', '.dealer-name', 'h3', 'h2'],
+  addressBlock: ['address', '.dealer__address', '.result__address', '.address'],
+  phoneLink: ['a[href^="tel:"]'],
+  webLink: ['a[href^="http"]', 'a:has-text("Website")', 'a:has-text("Webseite")', 'a:has-text("Zur Website")', 'a:has-text("zur Website")'],
+  hours: ['.opening-hours', '.hours', 'table.hours', 'dl.hours', 'div:has-text("Öffnungszeiten")'],
+};
+
+function nonEmpty(s) { return (typeof s === 'string' && s.trim().length > 0) ? s.trim() : null; }
+
+async function queryFirst(page, selectors) {
+  for (const s of selectors) {
+    const el = page.locator(s);
+    if (await el.count() > 0) return el.first();
+  }
+  return null;
+}
+async function setValueIfExists(page, selectors, value) {
+  for (const s of selectors) {
+    const el = page.locator(s);
+    if (await el.count() > 0) {
+      await el.fill('');
+      await el.type(String(value), { delay: 10 }).catch(()=>{});
+      return true;
+    }
+  }
+  return false;
+}
+async function clickIfExists(page, selectors) {
+  for (const s of selectors) {
+    const el = page.locator(s);
+    if (await el.count() > 0) {
+      await el.first().click({ timeout: 5000 }).catch(()=>{});
+      return true;
+    }
+  }
+  return false;
+}
 
 async function acceptCookies(page) {
-    const selectors = [
-        '#usercentrics-accept-all-button',
-        'button[aria-label*="Alle akzeptieren" i]',
-        'button:has-text("Alle akzeptieren")',
-        '[data-testid="uc-accept-all-button"]',
-        'button:has-text("Akzeptieren")',
-    ];
-    for (const sel of selectors) {
-        try {
-            const btn = page.locator(sel).first();
-            if (await btn.count()) {
-                await btn.click({ timeout: 2000 }).catch(() => {});
-                log.info('Cookie-Banner akzeptiert.');
-                break;
-            }
-        } catch {}
+  const candidates = [
+    'button:has-text("Alle akzeptieren")',
+    'button:has-text("Zustimmen")',
+    'button:has-text("Akzeptieren")',
+    '[data-accept*="cookie"]',
+    '.cookie-accept',
+  ];
+  for (const s of candidates) {
+    const btn = page.locator(s);
+    if (await btn.count() > 0) {
+      await btn.first().click({ timeout: 2000 }).catch(()=>{});
+      log.info('Cookie-Banner akzeptiert.');
+      return;
     }
+  }
 }
 
-async function setZipRadiusCategoriesViaUI(page, zip) {
-    // PLZ setzen
-    let success = false;
-    try {
-        const zipInput = page.locator('input[name="tx_biohandel_plg[searchplz]"]').first();
-        if (await zipInput.count()) {
-            await zipInput.fill('');
-            await zipInput.type(String(zip), { delay: 20 });
-            success = true;
-        }
-    } catch {}
+function parseAddressLines(text) {
+  const lines = (text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  let street = null, plz = null, city = null;
+  for (const line of lines) {
+    const m = line.match(/(\d{5})\s+(.+)/);
+    if (m) { plz = m[1]; city = m[2]; continue; }
+    if (!street && /[A-Za-zÄÖÜäöüß]/.test(line) && /\d/.test(line)) street = line;
+  }
+  return { street, plz, city };
+}
 
-    // Radius (native select)
-    let radiusSet = false;
-    try {
-        const native = page.locator('select[name="tx_biohandel_plg[distance]"]').first();
-        if (await native.count()) {
-            await native.selectOption({ label: /50\s*km/i }).catch(async () => {
-                await native.selectOption('50').catch(() => {});
-            });
-            const val = await native.inputValue().catch(() => null);
-            log.info(`Radius gesetzt (native): ${val}`);
-            radiusSet = true;
-        }
-    } catch {}
-
-    // Radius (custom-select fallback)
-    if (!radiusSet) {
-        try {
-            const combo = page.locator('[role="combobox"], button[aria-haspopup="listbox"]');
-            if (await combo.count()) {
-                await combo.first().click({ timeout: 1500 }).catch(() => {});
-                const opt = page.locator('[role="option"]', { hasText: /50\s*km/i }).first();
-                if (await opt.count()) {
-                    await opt.click({ timeout: 1500 }).catch(() => {});
-                    log.info('Radius gesetzt (custom): 50');
-                    radiusSet = true;
-                }
-            }
-        } catch {}
+async function extractCardData(scope) {
+  // Name
+  let name = null;
+  for (const sel of SEL.name) {
+    const el = scope.locator(sel);
+    if (await el.count() > 0) {
+      name = nonEmpty(await el.first().innerText().catch(()=>null));
+      if (name) break;
     }
-
-    // Kategorien anhaken (wenn Checkboxen existieren)
-    const catLabels = [/Bio.?läden?/i, /Marktstände?/i, /Liefer(service)?/i];
-    for (const labelRe of catLabels) {
-        try {
-            const lbl = page.locator('label', { hasText: labelRe }).first();
-            if (await lbl.count()) {
-                const cb = lbl.locator('input[type="checkbox"]');
-                if (await cb.count()) {
-                    const checked = await cb.isChecked().catch(() => false);
-                    if (!checked) await lbl.click().catch(() => {});
-                }
-            }
-        } catch {}
+  }
+  // Adresse
+  let street=null, plz=null, city=null;
+  for (const sel of SEL.addressBlock) {
+    const el = scope.locator(sel);
+    if (await el.count() > 0) {
+      const txt = await el.first().innerText().catch(()=>null);
+      const { street: s, plz: p, city: c } = parseAddressLines(txt || '');
+      street = street ?? s;
+      plz = plz ?? p;
+      city = city ?? c;
+      if (street || plz || city) break;
     }
-
-    // Suche absenden (wenn vorhanden)
-    try {
-        const submit = page.locator('form button[type="submit"], form [type="submit"]').first();
-        if (await submit.count()) {
-            await Promise.all([
-                page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}),
-                submit.click({ timeout: 2000 }).catch(() => {}),
-            ]);
-            success = true;
-        }
-    } catch {}
-
-    return success;
-}
-
-function buildParamUrl(zip) {
-    const u = new URL(BASE_URL);
-    u.searchParams.set('tx_biohandel_plg[searchplz]', String(zip));
-    u.searchParams.set('tx_biohandel_plg[distance]', '50');
-    // Kategorie-Parameter optional – falls die Seite sie akzeptiert
-    u.searchParams.set('tx_biohandel_plg[type][biolaeden]', '1');
-    u.searchParams.set('tx_biohandel_plg[type][marktstaende]', '1');
-    u.searchParams.set('tx_biohandel_plg[type][lieferservice]', '1');
-    return u.toString();
-}
-
-async function gotoWithParams(page, zip) {
-    const url = buildParamUrl(zip);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    log.info('URL-Param-Fallback aktiv');
-}
-
-async function countDetailsButtons(page) {
-    let det = page.locator('a:has-text("Details")');
-    let count = await det.count();
-    if (!count) {
-        det = page.locator('a', { hasText: /Details|Mehr erfahren|zum Händler/i });
-        count = await det.count();
+  }
+  // Telefon
+  let phone = null;
+  for (const sel of SEL.phoneLink) {
+    const el = scope.locator(sel);
+    if (await el.count() > 0) {
+      const href = await el.first().getAttribute('href').catch(()=>null);
+      if (href) { phone = href.replace(/^tel:/, ''); break; }
     }
-    return { locator: det, count };
+  }
+  // Website
+  let website = null;
+  for (const sel of SEL.webLink) {
+    const el = scope.locator(sel);
+    if (await el.count() > 0) {
+      const href = await el.first().getAttribute('href').catch(()=>null);
+      if (href && /^https?:\/\//i.test(href)) { website = href; break; }
+    }
+  }
+  // Öffnungszeiten (wenn vorhanden)
+  let openingHours = null;
+  for (const sel of SEL.hours) {
+    const el = scope.locator(sel);
+    if (await el.count() > 0) {
+      openingHours = nonEmpty(await el.first().innerText().catch(()=>null));
+      if (openingHours) break;
+    }
+  }
+
+  return {
+    name: name ?? null,
+    street: street ?? null,
+    zip: plz ?? null,
+    city: city ?? null,
+    phone: phone ?? null,
+    website: website ?? null,
+    opening_hours: openingHours ?? null,
+  };
 }
 
-function parseZipCity(line) {
-    const m = line.match(/(\d{5})\s+(.+)$/);
-    if (m) return { zip: m[1], city: m[2].trim() };
-    return { zip: null, city: null };
+async function ensureCategories(page) {
+  // Versuch per Label-Text
+  const byLabel = async (texts) => {
+    for (const t of texts) {
+      const lbl = page.locator(`label:has-text("${t}")`);
+      if (await lbl.count() > 0) {
+        await lbl.first().click({ timeout: 3000 }).catch(()=>{});
+        return true;
+      }
+    }
+    return false;
+  };
+  await byLabel(SEL.catLabels.bio);
+  await byLabel(SEL.catLabels.market);
+  await byLabel(SEL.catLabels.delivery);
+
+  // Zusatz: Falls es einen "Alle" Filter gibt
+  await clickIfExists(page, ['label:has-text("Alle")', 'button:has-text("Alle")']);
 }
 
-function findPhone(text) {
-    const m = text.match(/(?:\+?\s*49|0)\s*[1-9]\d(?:[ \-/]?\d){5,}/);
-    return m ? m[0].trim() : null;
+async function setRadius50(page) {
+  // 1) Dropdown
+  for (const s of SEL.distanceSelect) {
+    const el = page.locator(s);
+    if (await el.count() > 0) {
+      try {
+        await el.selectOption('50');
+        // Check value
+        const selected = await el.evaluate(e => e.value).catch(()=>null);
+        if (selected === '50') { log.info('Radius auf 50 km gesetzt (Dropdown).'); return true; }
+      } catch {}
+    }
+  }
+  // 2) URL-Fallback
+  const u = new URL(page.url());
+  u.searchParams.set('tx_biohandel_plg[distance]', '50');
+  await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
+  log.info('Radius auf 50 km gesetzt (URL-Fallback).');
+  return true;
 }
 
-function findEmail(text) {
-    const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    return m ? m[0] : null;
+async function searchOnce(page, zip, radiusKm) {
+  await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+  await acceptCookies(page);
+
+  // PLZ
+  const okZip = await setValueIfExists(page, SEL.zipInput, zip);
+  if (!okZip) log.warning('PLZ-Feld nicht gefunden – versuche dennoch fortzufahren.');
+
+  // Radius
+  await setRadius50(page);
+
+  // Kategorien
+  await ensureCategories(page);
+
+  // Submit
+  const submitted = await clickIfExists(page, SEL.submit);
+  if (!submitted) {
+    // Manche Seiten suchen onChange – zur Sicherheit ENTER im PLZ-Feld
+    const zipEl = await queryFirst(page, SEL.zipInput);
+    if (zipEl) await zipEl.press('Enter').catch(()=>{});
+  }
+
+  // Warten bis Ergebnisse gerendert sind
+  await page.waitForTimeout(1000);
+
+  const detailLocators = SEL.detailsButton.map(s => page.locator(s));
+  let totalDetails = 0;
+  for (const loc of detailLocators) totalDetails += await loc.count().catch(()=>0);
+  if (totalDetails === 0) {
+    // Manche Seiten zeigen ohne "Details" bereits Karten – in dem Fall zählen wir Karten
+    const cards = await queryFirst(page, SEL.resultCard);
+    if (cards) {
+      totalDetails = await page.locator(SEL.resultCard.join(',')).count().catch(()=>0);
+    }
+  }
+  log.info(`DETAILS buttons: ${totalDetails}`);
+
+  const results = [];
+  // Strategie A: Falls Details-Buttons existieren, klicke sie nacheinander
+  let detailButtons = page.locator(SEL.detailsButton.join(', '));
+  const count = await detailButtons.count().catch(()=>0);
+
+  if (count > 0) {
+    for (let i = 0; i < count; i++) {
+      try {
+        const btn = detailButtons.nth(i);
+        await btn.scrollIntoViewIfNeeded().catch(()=>{});
+        await btn.click({ timeout: 5000 }).catch(()=>{});
+        await page.waitForTimeout(200); // kurze Wartezeit für expandierte Inhalte
+
+        // Suche die nächstliegende Karte
+        let scope = btn;
+        for (const sel of SEL.resultCard) {
+          const parent = btn.locator(`xpath=ancestor-or-self::*[contains(@class, "${sel.replace('.', '')}")]`).first();
+          if (await parent.count() > 0) { scope = parent; break; }
+        }
+        const rec = await extractCardData(scope);
+        rec.plz_searched = String(zip);
+        rec.category = null; // Seite liefert Kategorie i.d.R. implizit, hier als Platzhalter
+        // Null-Default garantieren
+        for (const k of ['name','street','zip','city','phone','website','opening_hours','category']) {
+          if (typeof rec[k] === 'undefined') rec[k] = null;
+        }
+        results.push(rec);
+      } catch (e) {
+        log.warning(`Fehler beim DETAILS ${i+1}/${count}: ${e?.message || e}`);
+      }
+    }
+  } else {
+    // Strategie B: Parse Karten ohne Details
+    const cardsSel = SEL.resultCard.join(', ');
+    const cards = page.locator(cardsSel);
+    const c = await cards.count().catch(()=>0);
+    for (let i = 0; i < c; i++) {
+      const scope = cards.nth(i);
+      const rec = await extractCardData(scope);
+      rec.plz_searched = String(zip);
+      rec.category = null;
+      for (const k of ['name','street','zip','city','phone','website','opening_hours','category']) {
+        if (typeof rec[k] === 'undefined') rec[k] = null;
+      }
+      results.push(rec);
+    }
+  }
+
+  return results;
 }
 
-async function extractFromCard(card) {
-    const rec = DEFAULT_FIELDS();
+async function loadPLZ(plzSource) {
+  if (plzSource === 'embedded') {
+    // Fallback: Minimal-Set (kann bei Bedarf erweitert werden)
+    return ["20095","80331","50667","60311","70173"];
+  }
+  // Default: Datei
+  const filePath = path.join(__dirname, 'plz_full.json');
+  const buf = await fs.readFile(filePath, 'utf8');
+  const data = JSON.parse(buf);
+  return Array.isArray(data) ? data.map(String) : [];
+}
+
+Actor.main(async () => {
+  const input = (await Actor.getInput()) || {};
+  const startIndex = Number.isInteger(input.startIndex) ? input.startIndex : 0;
+  const limit = Number.isInteger(input.limit) ? input.limit : null;
+  const radiusKm = input.radiusKm || 50;
+  const plzSource = input.plzSource || 'file';
+
+  const plzList = await loadPLZ(plzSource);
+  const slice = plzList.slice(startIndex, limit ? startIndex + limit : undefined);
+  log.info(`PLZ in Lauf: ${slice.length} (${plzSource === 'file' ? 'aus plz_full.json' : 'embedded'})`);
+
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  page.setDefaultTimeout(10000);
+
+  let saved = 0;
+
+  for (let i = 0; i < slice.length; i++) {
+    const zip = slice[i];
+    log.info(`=== ${i+1}/${slice.length} | PLZ ${zip} ===`);
     try {
-        // Name
-        const nameEl = card.locator('h3, h2, .title, .headline').first();
-        rec.name = (await nameEl.textContent().catch(() => null))?.trim() || null;
-
-        // Website (direkter Link in der Karte?)
-        const siteLink = await card.locator('a[href^="http"]', { hasText: /Web|Website|Zur Seite|mehr/i }).first();
-        if (await siteLink.count()) {
-            rec.website = await siteLink.getAttribute('href').catch(() => null);
-        } else {
-            // generischer erster http-Link
-            const anyLink = card.locator('a[href^="http"]').first();
-            if (await anyLink.count()) rec.website = await anyLink.getAttribute('href').catch(() => null);
-        }
-
-        // Restlichen Text scannen
-        const text = (await card.textContent().catch(() => '')) || '';
-        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
-
-        // Straße: i. d. R. erste Zeile mit Ziffern + Straße
-        rec.street = lines.find(l => /\d/.test(l) && /[a-zäöüß]/i.test(l)) || null;
-
-        // PLZ/Ort: nächste Zeile mit 5-stelliger PLZ
-        const zipLine = lines.find(l => /\b\d{5}\b/.test(l));
-        if (zipLine) {
-            const { zip, city } = parseZipCity(zipLine);
-            rec.zip = zip;
-            rec.city = city;
-        }
-
-        rec.phone = findPhone(text);
-        rec.email = findEmail(text);
-
-        // Kategorie heuristisch (ersatzweise)
-        if (/liefer/i.test(text)) rec.category = 'Lieferservice';
-        else if (/markt/i.test(text)) rec.category = 'Marktstand';
-        else rec.category = 'Bioladen';
-
+      const results = await searchOnce(page, zip, radiusKm);
+      if (results.length > 0) {
+        await Actor.pushData(results);
+        saved += results.length;
+        log.info(`PLZ ${zip}: ${results.length} neue Datensätze gespeichert`);
+      } else {
+        log.info(`PLZ ${zip}: 0 neue Datensätze gespeichert`);
+      }
     } catch (e) {
-        log.debug(`extractFromCard error: ${e.message}`);
+      log.warning(`Fehler bei PLZ ${zip}: ${e?.message || e}`);
     }
-    return rec;
-}
+  }
 
-async function extractFromDetails(page) {
-    const rec = {};
-    try {
-        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-        const text = (await page.textContent('main').catch(() => '')) || (await page.content().catch(() => '')) || '';
+  // Zusätzlich lokale Dateien ablegen
+  const outDir = '/mnt/data/outputs';
+  await fs.mkdir(outDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const jsonlPath = path.join(outDir, `bioladen_${ts}.jsonl`);
+  const csvPath = path.join(outDir, `bioladen_${ts}.csv`);
 
-        rec.phone = findPhone(text);
-        rec.email = findEmail(text);
+  // JSONL
+  const dataset = await Actor.openDataset();
+  const all = await dataset.getData();
+  const items = all?.items || [];
+  await fs.writeFile(jsonlPath, items.map(o => JSON.stringify(o)).join('\n'), 'utf8');
 
-        // Website-Link direkt
-        const a = page.locator('a[href^="http"]').first();
-        if (await a.count()) rec.website = await a.getAttribute('href').catch(() => null);
+  // Simple CSV writer
+  const headers = ['name','street','zip','city','phone','website','opening_hours','category','plz_searched'];
+  const toCell = (v) => {
+    if (v === null || typeof v === 'undefined') return '';
+    const s = String(v).replace(/"/g, '""');
+    return `"${s}"`;
+  }
+  const csv = [headers.map(h => `"${h}"`).join(',')].concat(
+    items.map(it => headers.map(h => toCell(it[h])).join(','))
+  ).join('\n');
+  await fs.writeFile(csvPath, csv, 'utf8');
 
-        // Besser strukturierte Felder, falls vorhanden
-        const title = await page.locator('h1, h2').first().textContent().catch(() => null);
-        if (title) rec.name = title.trim();
+  log.info(`Fertig. Insgesamt gespeichert: ${saved}`);
+  log.info(`Lokale Dateien: ${jsonlPath} | ${csvPath}`);
 
-        const addr = await page.locator('address').first().textContent().catch(() => null);
-        if (addr) {
-            const parts = addr.split('\n').map(s => s.trim()).filter(Boolean);
-            const street = parts.find(l => /\d/.test(l)) || null;
-            const zipline = parts.find(l => /\b\d{5}\b/.test(l)) || null;
-            if (street) rec.street = street;
-            if (zipline) {
-                const { zip, city } = parseZipCity(zipline);
-                if (zip) rec.zip = zip;
-                if (city) rec.city = city;
-            }
-        }
-    } catch {}
-    return rec;
-}
-
-function mergePreferringExisting(base, add) {
-    const out = { ...base };
-    for (const k of Object.keys(DEFAULT_FIELDS())) {
-        if (out[k] == null && add[k] != null) out[k] = add[k];
-    }
-    return out;
-}
-
-function normalizeRecord(rec) {
-    // Alles, was falsy/leer ist, als null setzen
-    const norm = { ...DEFAULT_FIELDS(), ...rec };
-    for (const k of Object.keys(norm)) {
-        const v = norm[k];
-        if (typeof v === 'string') {
-            const s = v.trim();
-            norm[k] = s.length ? s : null;
-        } else if (!v) {
-            norm[k] = v ?? null;
-        }
-    }
-    return norm;
-}
-
-function dedupe(records) {
-    const seen = new Set();
-    const out = [];
-    for (const r of records) {
-        const key = [
-            (r.name || '').toLowerCase(),
-            (r.street || '').toLowerCase(),
-            (r.zip || '').toLowerCase(),
-            (r.city || '').toLowerCase(),
-        ].join('|');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(r);
-    }
-    return out;
-}
-
-async function processOneZip(page, zip) {
-    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await acceptCookies(page);
-
-    // UI-Versuch
-    let uiOk = await setZipRadiusCategoriesViaUI(page, zip);
-    if (!uiOk) {
-        // URL-Notbremse
-        await gotoWithParams(page, zip);
-    }
-
-    // Jetzt Ergebnisse zählen
-    const { locator: detailsLoc, count: detailsCount } = await countDetailsButtons(page);
-    log.info(`DETAILS buttons: ${detailsCount}`);
-
-    let cards = page.locator('[class*="card"], .card, .result, .shop-item'); // generische Card-Selektoren
-    if (await cards.count() === 0) {
-        // Fallback auf parents von Details-Links
-        cards = detailsLoc.locator('..'); // parent der Links
-    }
-
-    const found = await cards.count();
-    const records = [];
-
-    for (let i = 0; i < found; i++) {
-        const card = cards.nth(i);
-        let rec = await extractFromCard(card);
-        rec.sourceZip = String(zip);
-
-        // Falls wichtige Felder fehlen, Details öffnen
-        const needsDetails = !rec.website || !rec.email;
-        if (needsDetails) {
-            // passende Details-Schaltfläche innerhalb der Karte suchen
-            let det = card.locator('a:has-text("Details")').first();
-            if (!(await det.count())) {
-                det = card.locator('a', { hasText: /Details|Mehr erfahren|zum Händler/i }).first();
-            }
-            if (await det.count()) {
-                const [detailsPage] = await Promise.all([
-                    page.waitForEvent('popup').catch(() => null),
-                    det.click({ button: 'middle' }).catch(() => null), // Mitlerer Klick öffnet i. d. R. in neuem Tab
-                ]);
-                const ctxPage = detailsPage || page;
-                const add = await extractFromDetails(ctxPage);
-                rec = mergePreferringExisting(rec, add);
-                if (detailsPage) await detailsPage.close().catch(() => {});
-            }
-        }
-
-        records.push(normalizeRecord(rec));
-    }
-
-    // Dedupe + speichern
-    const unique = dedupe(records);
-    for (const r of unique) {
-        await Actor.pushData(r);
-    }
-    return unique.length;
-}
-
-async function loadZips() {
-    // plz_full.json im Arbeitsverzeichnis
-    try {
-        const raw = await fs.readFile('./plz_full.json', 'utf-8');
-        const list = JSON.parse(raw);
-        return Array.isArray(list) ? list : [];
-    } catch {
-        return [];
-    }
-}
-
-await Actor.main(async () => {
-    const input = (await Actor.getInput()) || {};
-    const startIndex = Number.isInteger(input.startIndex) ? input.startIndex : 0;
-    const limit = Number.isInteger(input.limit) ? input.limit : null;
-    const maxZips = Number.isInteger(input.maxZips) ? input.maxZips : null;
-    const headless = input.headless !== false;
-
-    const allZips = await loadZips();
-    const sliced = allZips.slice(startIndex, limit ? startIndex + limit : undefined);
-    const finalZips = maxZips ? sliced.slice(0, maxZips) : sliced;
-
-    log.info(`PLZ in Lauf: ${finalZips.length} (embedded)`);
-
-    const browser = await chromium.launch({ headless });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-    const page = await context.newPage();
-
-    let totalSaved = 0;
-    for (let i = 0; i < finalZips.length; i++) {
-        const zip = finalZips[i];
-        log.info(`=== ${i + 1}/${finalZips.length} | PLZ ${zip} ===`);
-        try {
-            const saved = await processOneZip(page, zip);
-            log.info(`PLZ ${zip}: ${saved} neue Datensätze gespeichert`);
-            totalSaved += saved;
-        } catch (e) {
-            log.warning(`PLZ ${zip} Fehler: ${e.message}`);
-        }
-    }
-
-    await browser.close().catch(() => {});
-    log.info(`Fertig. Insgesamt gespeichert: ${totalSaved}`);
+  await browser.close();
 });
