@@ -1,25 +1,18 @@
 FROM apify/actor-node-playwright-chrome:20
 
-# Workdir
 WORKDIR /usr/src/app
 
-# Install production deps as root (base image uses non-root by default)
+# Install deps as root to avoid EACCES, then hand over to myuser
 USER root
 COPY package*.json ./
 RUN npm install --omit=dev --omit=optional --no-audit --no-fund
 
-# Copy the rest of the app
+# Copy the rest of the project
 COPY . .
 
-# Fix ownership for runtime user
+# Ensure ownership for runtime
 RUN chown -R myuser:myuser /usr/src/app
-
-# Drop privileges
 USER myuser
 
-# Ensure Playwright uses preinstalled browsers from the base image
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib/playwright
-ENV APIFY_HEADLESS=1
-
-# Start the actor (single xvfb-run)
-CMD ["xvfb-run","-a","-s","-ac -screen 0 1920x1080x24+32 -nolisten tcp","node","main.js"]
+# Apify will wrap with xvfb-run automatically. Do NOT add xvfb here.
+CMD ["node", "main.js"]

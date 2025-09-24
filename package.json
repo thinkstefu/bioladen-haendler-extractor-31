@@ -2,13 +2,11 @@
   "name": "bioladen-haendler-extractor",
   "version": "4.1.0",
   "type": "module",
-  "description": "Extrahiert Biol\u00e4den/Marktst\u00e4nde/Lieferservices von bioladen.de per PLZ & 50km.",
-  "main": "main.js",
   "scripts": {
     "start": "node main.js"
   },
   "dependencies": {
-    "apify": "^3.4.5",
-    "playwright": "^1.55.1"
+    "apify": "3.4.5",
+    "playwright": "1.55.1"
   }
 }
