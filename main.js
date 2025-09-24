@@ -1,225 +1,248 @@
-// ESM + Apify v3
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'node:fs/promises';
 
 const SITE = 'https://www.bioladen.de/bio-haendler-suche';
 
+/**
+ * Utility: wait for some ms
+ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-function normalizeNullable(s) {
-  if (!s) return null;
-  const t = String(s).trim();
-  return t.length ? t : null;
-}
-
-function keyForDedup(it) {
-  return [it.name||'', it.street||'', it.zip||'', it.city||'', it.type||''].join('|').toLowerCase();
-}
-
-async function ensureRadius50(page) {
-  // triple enforcement: URL param already set by goto, but enforce UI too
+/**
+ * Ensures cookie banner is accepted once.
+ */
+async function acceptCookiesIfVisible(page) {
   try {
-    const sel = page.locator('select[name*="distance"]');
-    if (await sel.count()) {
-      await sel.selectOption('50');
-      await page.waitForLoadState('domcontentloaded');
+    // Try common selectors/texts
+    const btn = page.locator('button:has-text("Akzeptieren"), button:has-text("Einverstanden"), button[aria-label*="Akzept"]');
+    if (await btn.first().isVisible({ timeout: 1000 }).catch(()=>false)) {
+      await btn.first().click({ timeout: 2000 }).catch(()=>{});
+      log.info('Cookie-Banner akzeptiert.');
+      await sleep(300);
     }
   } catch {}
 }
 
-async function acceptCookies(page) {
-  // try several common selectors/texts
-  const variants = [
-    'button:has-text("Akzeptieren")',
-    'button:has-text("Einverstanden")',
-    'button:has-text("Alle akzeptieren")',
-    'text=Akzeptieren',
-  ];
-  for (const v of variants) {
-    const el = page.locator(v);
-    if (await el.count()) {
-      try { await el.first().click({ timeout: 2000 }); break; } catch {}
-    }
-  }
-}
+/**
+ * Sets ZIP and radius to 50km, submits the form properly.
+ * Also ensures all three category filters are ON (if present).
+ */
+async function setZipRadiusAndFilters(page, zip, radiusKm = 50) {
+  // Navigate with params first (fast path)
+  const url = new URL(SITE);
+  url.searchParams.set('tx_biohandel_plg[searchplz]', zip);
+  url.searchParams.set('tx_biohandel_plg[distance]', String(radiusKm));
+  await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 25000 });
 
-async function enableCategories(page) {
-  const labels = ['Bioläden', 'Marktstände', 'Lieferservice'];
-  for (const label of labels) {
-    try {
-      const cb = page.getByLabel(label, { exact: false });
-      if (await cb.count()) {
-        const isChecked = await cb.first().isChecked().catch(()=>false);
-        if (!isChecked) await cb.first().check({ timeout: 2000 });
+  await acceptCookiesIfVisible(page);
+
+  // Make sure the distance select is really set to 50 and trigger the form submit.
+  await page.evaluate(({ r }) => {
+    const sel = document.querySelector('select[name="tx_biohandel_plg[distance]"]');
+    if (sel) {
+      sel.value = String(r);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const zipInput = document.querySelector('input[name="tx_biohandel_plg[searchplz]"]');
+    if (zipInput) zipInput.dispatchEvent(new Event('change', { bubbles: true }));
+  }, { r: radiusKm });
+
+  // Ensure categories are checked (if the site exposes these)
+  const categoryLabels = ['Bioläden', 'Marktstände', 'Lieferservice', 'Lieferservices'];
+  for (const label of categoryLabels) {
+    const lab = page.locator(`label:has-text("${label}")`);
+    if (await lab.first().count().then(c=>c>0)) {
+      // click only if it's not checked yet
+      const input = await lab.first().locator('input[type="checkbox"]').elementHandle().catch(() => null);
+      if (input) {
+        const isChecked = await input.evaluate(el => el.checked);
+        if (!isChecked) await lab.first().click().catch(()=>{});
       } else {
-        // fallback: query by input value/name fragment
-        const candidate = page.locator('input[type="checkbox"]');
-        const n = await candidate.count();
-        for (let i=0;i<n;i++){
-          const it = candidate.nth(i);
-          const txt = (await it.evaluate(el => el.closest('label')?.innerText || '')).toLowerCase();
-          if (txt.includes(label.toLowerCase())) { await it.check({ timeout: 2000 }); break; }
-        }
+        // some templates place input elsewhere; just click label
+        await lab.first().click().catch(()=>{});
       }
-    } catch {}
-  }
-}
-
-async function openAllDetailsAndExtract(page) {
-  const records = [];
-  // First try the explicit DETAILS buttons
-  let buttons = page.locator('button, a').filter({ hasText: 'Details' });
-  let count = await buttons.count();
-  if (count === 0) {
-    // fallback: any card links that open detail modals
-    buttons = page.locator('a[href*="#"][data-bs-toggle="modal"], a[href*="modal"]');
-    count = await buttons.count();
-  }
-  if (count === 0) {
-    // ultimate fallback: take card items
-    buttons = page.locator('.tx_biohandel_plg .card a, .card a:has-text("Details")');
-    count = await buttons.count();
-  }
-
-  // iterate
-  for (let i = 0; i < count; i++) {
-    try {
-      const btn = buttons.nth(i);
-      await btn.scrollIntoViewIfNeeded();
-      await btn.click();
-      // wait for modal/dialog
-      const modal = page.locator('.modal.show, [role="dialog"][open]');
-      await modal.waitFor({ state: 'visible', timeout: 8000 }).catch(()=>{});
-      const html = await page.content();
-
-      const item = await modal.evaluate((root) => {
-        const pick = (sel) => root.querySelector(sel);
-
-        const getText = (sel) => {
-          const n = pick(sel);
-          return n ? n.textContent.trim() : null;
-        };
-
-        // Try headings for name
-        let name = getText('h2, h3, .modal-title, .card-title') || null;
-
-        // address block heuristics
-        const block = pick('.address, .kontakt, .contact, .modal-body, .card-body') || root;
-        const txt = block.textContent || '';
-
-        // Regexes
-        const phone = (txt.match(/(?:Telefon|Tel\.?|Phone)\s*[:]?\s*([+0-9\s\/()-]{6,})/i) || [])[1] || null;
-        const email = (txt.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || null;
-        const website = (txt.match(/https?:\/\/[\w.-]+(?:\/[\w./#?-]*)?/i) || [])[0] || null;
-        // Address lines
-        let street = null, zip = null, city = null;
-        const lines = txt.split(/\n|\r/).map(s => s.trim()).filter(Boolean);
-        for (const line of lines) {
-          const m = line.match(/^(\d{5})\s+(.+)$/);
-          if (m) { zip = m[1]; city = m[2]; continue; }
-          // crude street guess
-          if (!street && /\d/.test(line) && /(str\.|straße|weg|platz|allee|gasse|ring)/i.test(line)) street = line;
-        }
-
-        // type based on badges/text in modal
-        let type = null;
-        const lower = txt.toLowerCase();
-        if (lower.includes('lieferservice')) type = 'Lieferservice';
-        else if (lower.includes('marktstand') || lower.includes('wochenmarkt')) type = 'Marktstand';
-        else type = 'Bioladen';
-
-        return { name, street, zip, city, phone, email, website, type };
-      });
-
-      // normalize
-      for (const k of Object.keys(item)) item[k] = item[k] && typeof item[k] === 'string' ? item[k].trim() : item[k];
-      records.push({
-        name: normalizeNullable(item.name),
-        street: normalizeNullable(item.street),
-        zip: normalizeNullable(item.zip),
-        city: normalizeNullable(item.city),
-        phone: normalizeNullable(item.phone),
-        email: normalizeNullable(item.email),
-        website: normalizeNullable(item.website),
-        type: normalizeNullable(item.type),
-      });
-
-      // close modal
-      try { await page.keyboard.press('Escape'); } catch {}
-      try { await page.locator('.modal.show .btn-close, .modal.show [data-bs-dismiss="modal"]').click({ timeout: 1000 }); } catch {}
-      await sleep(100);
-    } catch (e) {
-      log.debug(`Modal iteration error: ${e.message}`);
     }
   }
-  return records;
+
+  // Submit the form (robust: try a few ways)
+  // 1) Explicit submit button (typical)
+  const submitBtn = page.locator('form button[type="submit"], form input[type="submit"]');
+  if (await submitBtn.first().count().then(c=>c>0)) {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 20000 }),
+      submitBtn.first().click().catch(()=>{}),
+    ]);
+  } else {
+    // 2) Fallback: press Enter in the ZIP field
+    const zipInput = page.locator('input[name="tx_biohandel_plg[searchplz]"]');
+    if (await zipInput.count() > 0) {
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 20000 }),
+        zipInput.press('Enter').catch(()=>{}),
+      ]);
+    }
+  }
+
+  // Small wait for dynamic content
+  await sleep(600);
 }
 
-async function setZipAndSearch(page, zip) {
-  const url = `${SITE}?tx_biohandel_plg[searchplz]=${zip}&tx_biohandel_plg[distance]=50`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-  await acceptCookies(page);
-  await ensureRadius50(page);
-  await enableCategories(page);
-  // Some pages require explicit submit
-  try {
-    const submit = page.locator('form button[type="submit"], form input[type="submit"]');
-    if (await submit.count()) { await submit.first().click({ timeout: 2000 }); await page.waitForLoadState('domcontentloaded'); }
-  } catch {}
+/**
+ * Extracts all "Details" links/buttons on the result list.
+ */
+async function getDetailsButtons(page) {
+  const candidates = page.locator('a:has-text("Details"), button:has-text("Details")');
+  const count = await candidates.count();
+  log.info(`DETAILS buttons: ${count}`);
+  return candidates;
 }
 
-Actor.main(async () => {
-  const inputZips = JSON.parse(await fs.readFile('./plz_full.json', 'utf8')).map(String);
-  const browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] });
-  const page = await (await browser.newContext()).newPage();
+/**
+ * Parse a modal content after opening a Details link.
+ * Tries to extract clean fields. Missing fields -> nulls.
+ */
+async function parseCurrentModal(page) {
+  // Wait for modal-ish container
+  const modal = page.locator('[role="dialog"], .modal, .reveal, .popup, .c-popup, .mfp-content').first();
+  await modal.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
 
-  // block heavy resources
-  await page.route('**/*', (route) => {
-    const type = route.request().resourceType();
-    if (['image','font','stylesheet'].includes(type)) route.abort();
-    else route.continue();
-  });
+  // Pull text and links from the visible modal area
+  const text = await modal.innerText().catch(() => '');
+  const name = await modal.locator('h1, h2, h3, .title, .shop-title').first().innerText().catch(() => null);
 
-  const dataset = await Actor.openDataset();
+  // Extract commonly structured fields
+  const email = await modal.locator('a[href^="mailto:"]').first().getAttribute('href').catch(()=>null);
+  const phone = await modal.locator('a[href^="tel:"]').first().getAttribute('href').catch(()=>null);
+  const website = await modal.locator('a[href^="http"]').first().getAttribute('href').catch(()=>null);
+
+  // Address chunks (very heuristic)
+  let street = null, zip = null, city = null;
+  if (text) {
+    const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+    // Find line with 5-digit ZIP
+    for (const line of lines) {
+      const m = line.match(/(\d{5})\s+(.+)/);
+      if (m) { zip = m[1]; city = m[2].replace(/^D-/, '').trim(); }
+    }
+    // Street likely appears before ZIP/City
+    const zipIdx = lines.findIndex(l => /\d{5}\s+/.test(l));
+    if (zipIdx > 0) street = lines[zipIdx - 1];
+  }
+
+  // Type (Bioladen/Marktstand/Lieferservice) – try to infer from modal text
+  let kind = null;
+  if (text) {
+    const t = text.toLowerCase();
+    if (t.includes('marktstand')) kind = 'Marktstand';
+    else if (t.includes('lieferservice') || t.includes('lieferdienst')) kind = 'Lieferservice';
+    else kind = 'Bioladen';
+  }
+
+  // Öffnungszeiten (collect block that includes weekday names)
+  let opening_hours = null;
+  if (text) {
+    const block = text.split('\n').filter(l => /(mo|di|mi|do|fr|sa|so)\.?/i.test(l)).join(' | ');
+    opening_hours = block || null;
+  }
+
+  const norm = (v) => v ?? null;
+  return {
+    name: norm(name),
+    kind: norm(kind),
+    street: norm(street),
+    zip: norm(zip),
+    city: norm(city),
+    phone: phone ? phone.replace(/^tel:/, '') : null,
+    email: email ? email.replace(/^mailto:/, '') : null,
+    website: website || null,
+    opening_hours: norm(opening_hours),
+  };
+}
+
+/**
+ * Close modal (try a few common ways).
+ */
+async function closeModal(page) {
+  // clickable close buttons
+  const closeSelectors = [
+    'button[aria-label="Schließen"]',
+    'button[aria-label="Close"]',
+    'button:has-text("Schließen")',
+    '.mfp-close',
+    '.modal-close, .close'
+  ];
+  for (const sel of closeSelectors) {
+    const btn = page.locator(sel).first();
+    if (await btn.count() > 0 && await btn.isVisible().catch(()=>false)) {
+      await btn.click().catch(()=>{});
+      await sleep(150);
+      return;
+    }
+  }
+  // fallback: press Escape
+  await page.keyboard.press('Escape').catch(()=>{});
+  await sleep(150);
+}
+
+async function runOnce(page, zip) {
+  await setZipRadiusAndFilters(page, zip, 50);
+  const details = await getDetailsButtons(page);
+  const n = await details.count();
+  const results = [];
   const seen = new Set();
-  let saved = 0;
 
-  for (let i = 0; i < inputZips.length; i++) {
-    const zip = inputZips[i];
-    log.info(`=== ${i+1}/${inputZips.length} | PLZ ${zip} ===`);
-    try {
-      await setZipAndSearch(page, zip);
-      const recs = await openAllDetailsAndExtract(page);
-      // dedupe and save
-      const uniques = [];
-      for (const r of recs) {
-        const key = keyForDedup(r);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        // ensure all keys present / null default
-        uniques.push({
-          name: r.name ?? null,
-          street: r.street ?? null,
-          zip: r.zip ?? null,
-          city: r.city ?? null,
-          phone: r.phone ?? null,
-          email: r.email ?? null,
-          website: r.website ?? null,
-          type: r.type ?? null,
-          source_zip: zip,
-        });
-      }
-      if (uniques.length) {
-        await dataset.pushData(uniques);
-        saved += uniques.length;
-      }
-      log.info(`PLZ ${zip}: ${uniques.length} neue Datensätze gespeichert (total ${saved})`);
-    } catch (e) {
-      log.warning(`PLZ ${zip} Fehler: ${e.message}`);
-    }
+  for (let i = 0; i < n; i++) {
+    // open in same tab
+    const btn = details.nth(i);
+    await btn.scrollIntoViewIfNeeded().catch(()=>{});
+    await btn.click().catch(()=>{});
+    await sleep(300);
+
+    const rec = await parseCurrentModal(page).catch(() => null);
+    await closeModal(page);
+
+    if (!rec) continue;
+    // dedupe key
+    const key = [rec.name, rec.street, rec.zip, rec.city].map(v => (v || '').toLowerCase()).join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push(rec);
   }
 
-  await browser.close();
-  log.info(`Fertig. Insgesamt gespeichert: ${saved}`);
-});
+  log.info(`PLZ ${zip}: ${results.length} Datensätze extrahiert`);
+  // push to default dataset
+  for (const r of results) await Actor.pushData(r);
+}
+
+await Actor.init();
+
+// read input, fallback to local json
+const input = await Actor.getInput() || {};
+let plzList = input.plz;
+if (!plzList || !Array.isArray(plzList) || plzList.length === 0) {
+  const raw = await fs.readFile(new URL('./plz_full.json', import.meta.url), 'utf-8').catch(()=>null);
+  if (raw) plzList = JSON.parse(raw).plz;
+}
+if (!plzList) plzList = ['20095']; // last resort
+
+const concurrency = Math.max(1, Math.min(4, Number(input.concurrency) || 1));
+log.info(`PLZ in Lauf: ${plzList.length}`);
+
+const browser = await chromium.launch({ headless: true });
+const context = await browser.newContext();
+const page = await context.newPage();
+
+// Reuse single page sequentially (Actor concurrency=1 by default here)
+for (let i = 0; i < plzList.length; i++) {
+  const zip = plzList[i];
+  log.info(`=== ${i+1}/${plzList.length} | PLZ ${zip} ===`);
+  try {
+    await runOnce(page, zip);
+  } catch (e) {
+    log.warning(`PLZ ${zip} Fehler: ${e.message}`);
+  }
+}
+
+await browser.close();
+await Actor.exit();

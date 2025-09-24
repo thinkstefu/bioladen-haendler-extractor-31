@@ -1,8 +1,7 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.2.1",
+  "version": "4.1.0",
   "type": "module",
-  "description": "Extracts Weiling bioladen dealer data by ZIP with 50km radius.",
   "main": "main.js",
   "scripts": {
     "start": "node main.js"
