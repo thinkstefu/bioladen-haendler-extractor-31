@@ -1,271 +1,274 @@
-const Apify = require('apify');
-const { chromium } = require('playwright');
+import { Actor, log } from 'apify';
+import { chromium } from 'playwright';
 
-const BASE_URL = 'https://www.bioladen.de/bio-haendler-suche';
+/** Utility: wait a bit */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+/** Extract clean text helper */
+const t = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
 
-async function acceptCookies(page) {
-  // Try multiple selectors / texts
-  const candidates = [
-    'button:has-text("Akzeptieren")',
-    'button:has-text("Alle akzeptieren")',
-    'button[aria-label*="akzept"]',
-    'button.cookie-accept',
-    'button#accept-all',
-  ];
-  for (const sel of candidates) {
-    const btn = page.locator(sel);
-    if (await btn.first().isVisible().catch(() => false)) {
-      await btn.first().click({ timeout: 2000 }).catch(()=>{});
-      await sleep(300);
-      return true;
-    }
-  }
-  // Fallback: click any button that includes "akzept"
-  const clicked = await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const cand = buttons.find(b => /akzept/i.test(b.textContent || ''));
-    if (cand) { cand.click(); return true; }
-    return false;
-  }).catch(()=>false);
-  return clicked;
-}
-
-async function ensureRadius50(page) {
-  // Try select element with "distance"
-  const ok = await page.evaluate(() => {
-    const fire = (el, type) => el && el.dispatchEvent(new Event(type, { bubbles: true }));
-    const selects = Array.from(document.querySelectorAll('select'));
-    // prefer name contains distance
-    let sel = selects.find(s => /distance/i.test(s.name || s.id || '')) || selects[0];
-    if (!sel) return false;
-    // Try exact value "50" or option text includes "50"
-    let value = '50';
-    const optByValue = sel.querySelector('option[value="50"], option[value="50 km"], option[value="50km"]');
-    if (optByValue) value = optByValue.value;
-    else {
-      const optByText = Array.from(sel.options || []).find(o => /(^|\s)50(\s|$)/.test((o.textContent||'').replace(/\s+/g,' ')));
-      if (optByText) value = optByText.value;
-    }
-    sel.value = value;
-    fire(sel, 'input'); fire(sel, 'change');
-    return true;
-  }).catch(()=>false);
-
-  // If we changed it, submit by hitting Enter in the form or clicking the submit
-  const submitSel = 'form button[type="submit"], form input[type="submit"]';
-  const submit = page.locator(submitSel).first();
-  if (await submit.isVisible().catch(()=>false)) {
-    await submit.click({ timeout: 2000 }).catch(()=>{});
+/** Parse address lines into structured fields */
+function parseAddress(raw) {
+  const out = { strasse: null, plz: null, ort: null };
+  if (!raw) return out;
+  const line = raw.replace(/\s+/g, ' ').trim();
+  const m = line.match(/(.*?),\s*(\d{5})\s+([^,]+)/);
+  if (m) {
+    out.strasse = m[1].trim();
+    out.plz = m[2];
+    out.ort = m[3].trim();
   } else {
-    // Press Enter in PLZ input if present
-    const plzField = page.locator('input[name*="searchplz"], input[placeholder*="PLZ"], input[type="search"]').first();
-    if (await plzField.isVisible().catch(()=>false)) {
-      await plzField.press('Enter').catch(()=>{});
-    }
-  }
-  // short settle
-  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(()=>{});
-  await sleep(250);
-  return ok;
-}
-
-async function setCategories(page) {
-  // Ensure all three: Bioläden, Marktstände, Lieferservice (if present)
-  await page.evaluate(() => {
-    const clickLabel = (txts) => {
-      const labels = Array.from(document.querySelectorAll('label, span, a, button'));
-      const lab = labels.find(l => txts.some(t => (l.textContent||'').toLowerCase().includes(t)));
-      if (!lab) return false;
-      // try to find checkbox within label or previous sibling
-      let cb = lab.querySelector('input[type="checkbox"]');
-      if (!cb) {
-        const prev = lab.previousElementSibling;
-        if (prev && prev.matches('input[type="checkbox"]')) cb = prev;
+    // Fallback: try splitting on line breaks or commas
+    const parts = line.split(/,|\n/).map(s => s.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const m2 = parts[1].match(/(\d{5})\s+(.+)/);
+      if (m2) {
+        out.strasse = parts[0];
+        out.plz = m2[1];
+        out.ort = m2[2];
+      } else {
+        out.strasse = parts[0];
+        out.ort = parts.slice(1).join(', ');
       }
-      if (cb && !cb.checked) { cb.click(); return true; }
-      // If no checkbox, try clicking label itself (some UIs toggle pills)
-      lab.click();
-      return true;
-    };
-    clickLabel(['bioläden','bioladen']);
-    clickLabel(['marktstände','marktstand']);
-    clickLabel(['liefer','lieferservice']);
-  }).catch(()=>{});
-}
-
-async function fillZipAndSubmit(page, zip) {
-  // Fill PLZ field
-  const field = page.locator('input[name*="searchplz"], input[placeholder*="PLZ"], input[aria-label*="Postleitzahl"], input[type="search"], input[type="text"]').first();
-  if (await field.isVisible().catch(()=>false)) {
-    await field.fill('');
-    await field.type(String(zip), { delay: 10 }).catch(()=>{});
-    // Press Enter
-    await field.press('Enter').catch(()=>{});
+    } else {
+      out.strasse = line;
+    }
   }
-  // Also try clicking submit
-  const submit = page.locator('form button[type="submit"], form input[type="submit"]').first();
-  if (await submit.isVisible().catch(()=>false)) {
-    await submit.click().catch(()=>{});
-  }
-  // Wait for results to render a bit
-  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(()=>{});
-  await sleep(300);
+  return out;
 }
 
-async function navigateForZip(page, zip, radius) {
-  // Direct URL first (fast path)
-  const url = `${BASE_URL}?tx_biohandel_plg[searchplz]=${encodeURIComponent(zip)}&tx_biohandel_plg[distance]=${encodeURIComponent(radius)}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(250);
-  await acceptCookies(page).catch(()=>{});
-  await ensureRadius50(page).catch(()=>{});
-  await setCategories(page).catch(()=>{});
-  // Double-ensure zip is in field (some backends require form submit)
-  await fillZipAndSubmit(page, zip).catch(()=>{});
+/** Ensure the cookie banner is accepted (idempotent) */
+async function acceptCookies(page) {
+  try {
+    // Usercentrics variants
+    const sel = [
+      'button:has-text("Akzeptieren")',
+      'button:has-text("Einverstanden")',
+      'button:has-text("Alle akzeptieren")',
+      '#usercentrics-accept-button',
+      '[data-testid="uc-accept-all-button"]'
+    ].join(', ');
+    const btn = page.locator(sel).first();
+    if (await btn.count()) {
+      await btn.click({ timeout: 3000 });
+      log.info('Cookie-Banner akzeptiert.');
+      await sleep(300);
+    }
+  } catch { /* ignore */ }
 }
 
-async function countDetailButtons(page) {
-  // Count visible Details triggers
-  const n = await page.evaluate(() => {
-    const isDetails = (el) => {
-      const txt = (el.textContent || '').trim().toLowerCase();
-      return /^details$/.test(txt) || txt === 'details »' || txt === '» details' || txt.includes('details');
-    };
-    const btns = Array.from(document.querySelectorAll('a, button'));
-    return btns.filter(isDetails).length;
-  });
-  return n;
-}
+/** Enforce radius=50 and set postal code via DOM, then submit */
+async function setZipAndRadiusAndSearch(page, zip, radiusKm) {
+  await page.waitForLoadState('domcontentloaded', { timeout: 20000 });
+  await acceptCookies(page);
 
-async function extractFromModal(page) {
-  return await page.evaluate(() => {
-    const modal = document.querySelector('.modal.show, .modal.fade.show, .modal[style*="display: block"], [role="dialog"].show, [role="dialog"]');
-    if (!modal) return null;
-
-    const getText = (sel) => {
-      const el = modal.querySelector(sel);
-      return el ? (el.textContent || '').replace(/\u00a0/g,' ').trim() : null;
-    };
-    const raw = (modal.innerText || '').replace(/\u00a0/g,' ').trim();
-
-    // Heuristics for fields
-    let name = getText('h4, h3, .modal-title, .dealer-title, .leaflet-popup-content h4');
-    const links = Array.from(modal.querySelectorAll('a[href]'));
-    let phone = null, email = null, website = null;
-    const telEl = modal.querySelector('a[href^="tel:"]'); if (telEl) phone = telEl.getAttribute('href').replace(/^tel:/i,'').trim();
-    const mailEl = modal.querySelector('a[href^="mailto:"]'); if (mailEl) email = mailEl.getAttribute('href').replace(/^mailto:/i,'').trim();
-    const siteLink = links.find(a => /^https?:/i.test(a.getAttribute('href')||'') && !/bioladen\.de/i.test(a.href));
-    if (siteLink) website = siteLink.href;
-
-    // Address lines: find a line with 5-digit zip
-    let street=null, zip=null, city=null;
-    const lines = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
-    for (let i=0;i<lines.length;i++){
-      const m = lines[i].match(/(\d{5})\s+(.+)/);
-      if (m) {
-        zip = m[1];
-        city = m[2].trim();
-        street = (i>0) ? lines[i-1] : null;
-        break;
+  await page.evaluate((zipArg, radiusArg) => {
+    // set PLZ
+    const zipInput = document.querySelector(
+      'input[name*="searchplz"], input[placeholder*="PLZ"], input[aria-label*="Postleitzahl"], input[type="text"]'
+    );
+    if (zipInput) {
+      zipInput.focus();
+      zipInput.value = '';
+      zipInput.value = zipArg;
+      zipInput.dispatchEvent(new Event('input', { bubbles: true }));
+      zipInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    // set radius
+    const radius = document.querySelector('select[name*="distance"], select#distance');
+    if (radius) {
+      radius.value = String(radiusArg);
+      radius.dispatchEvent(new Event('input', { bubbles: true }));
+      radius.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    // ensure categories ON if present
+    const checkIfExistsThenCheck = (labelText) => {
+      const label = Array.from(document.querySelectorAll('label')).find(l => (l.textContent||'').match(new RegExp(labelText, 'i')));
+      if (label) {
+        const input = label.querySelector('input[type="checkbox"]');
+        if (input && !input.checked) {
+          input.click();
+        }
       }
-    }
-    if (street && /^(Tel\.|Telefon|E-?Mail)/i.test(street)) street = null;
-    if (!name) {
-      // Often first line is the name
-      name = lines[0] && lines[0] !== street ? lines[0] : name;
-    }
+    };
+    checkIfExistsThenCheck('Bioläden');
+    checkIfExistsThenCheck('Marktstände');
+    checkIfExistsThenCheck('Lieferservice');
 
-    // Category guess
-    let category = null;
-    const catLine = lines.find(s => /(Bio.?laden|Marktstand|Liefer(service)?)/i.test(s));
-    if (catLine) {
-      if (/Marktstand/i.test(catLine)) category = 'Marktstand';
-      else if (/Liefer/i.test(catLine)) category = 'Lieferservice';
-      else category = 'Bioladen';
+    // submit form
+    const form = document.querySelector('form[action*="bio-haendler-suche"]') || document.querySelector('form');
+    let submit = form?.querySelector('button[type="submit"], input[type="submit"]');
+    if (!submit) {
+      submit = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(b => /suchen|finden/i.test(b.textContent||''));
     }
+    if (submit) submit.click();
+  }, zip, radiusKm);
 
-    return { name, category, street, zip, city, phone, email, website, raw_text: raw };
-  });
+  // wait for results area presence/update
+  const resultsRoot = page.locator('.biohaendler-suche, .tx-biohandel, .results, .container').first();
+  await resultsRoot.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 }
 
-async function clickCloseModal(page) {
-  const closeSel = '.modal.show [data-bs-dismiss="modal"], .modal.show .btn-close, .modal.show button.close, .modal.show .modal-footer button';
-  const btn = page.locator(closeSel).first();
-  if (await btn.isVisible().catch(()=>false)) {
-    await btn.click({ timeout: 2000 }).catch(()=>{});
-    await page.waitForTimeout(150);
-    return;
+/** Collect all "Details" buttons across categories */
+async function findDetailButtons(page) {
+  // try direct button/anchor text match
+  let loc = page.locator('button:has-text("Details"), a:has-text("Details")');
+  let cnt = await loc.count();
+  if (cnt > 0) return loc;
+
+  // fallback: any element that looks like a details trigger
+  loc = page.locator('[data-bs-toggle="modal"], [data-toggle="modal"], .modal-trigger, .btn:has-text("Details")');
+  cnt = await loc.count();
+  if (cnt > 0) return loc;
+
+  // final fallback: try to click cards sequentially (not ideal, but safer)
+  return page.locator('.card, .result-item, .store-result').locator('button, a');
+}
+
+/** Extract one modal */
+async function extractFromOpenModal(page, sourceZip) {
+  const modal = page.locator('.modal.show, [role="dialog"][aria-modal="true"]').first();
+  await modal.waitFor({ state: 'visible', timeout: 10000 });
+
+  // Name: prefer modal title
+  let name = await modal.locator('h3, h4, .modal-title, .h3, .h4').first().textContent().catch(() => '');
+  name = (name || '').replace(/\s+/g, ' ').trim();
+
+  // Gather all text once for robust parsing
+  const text = (await modal.textContent() || '').replace(/\s+/g, ' ').trim();
+
+  // Adresse: try explicit fields or lines
+  let addressLine = '';
+  const addrNode = await modal.locator('.address, .adresse, address').first().textContent().catch(() => '');
+  addressLine = (addrNode || '').trim();
+  if (!addressLine) {
+    // try to locate street + zip lines by regex in full text
+    const m = text.match(/([^\n,]+?),\s*(\d{5})\s+([A-Za-zÄÖÜäöüß\-\s]+)/);
+    if (m) addressLine = `${m[1]}, ${m[2]} ${m[3]}`;
   }
-  // Fallback: press Escape
-  await page.keyboard.press('Escape').catch(()=>{});
-  await page.waitForTimeout(150);
+  const { strasse, plz, ort } = parseAddress(addressLine);
+
+  // Telefon
+  let telefon = '';
+  const phoneCandidate = text.match(/(?:Tel\.?|Telefon)\s*:?\s*([+\d][\d\s\-/()]+)(?!\S)/i);
+  if (phoneCandidate) telefon = phoneCandidate[1].trim();
+
+  // E-Mail
+  let email = '';
+  const emailNode = await modal.locator('a[href^="mailto:"]').first().getAttribute('href').catch(() => null);
+  if (emailNode) email = emailNode.replace(/^mailto:/i, '').trim();
+  if (!email) {
+    const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (m) email = m[0];
+  }
+
+  // Website
+  let web = '';
+  const webHref = await modal.locator('a[href^="http"]').first().getAttribute('href').catch(() => null);
+  if (webHref) web = webHref.trim();
+
+  // Öffnungszeiten (grober Block)
+  let oeffnungszeiten = '';
+  const oh = text.match(/Öffnungszeiten[:\s]*([^]*?)(?:Kontakt|Telefon|E-Mail|Web|Website|$)/i);
+  if (oh) oeffnungszeiten = oh[1].trim();
+
+  // Kategorie: aus Modal-Labels ableiten
+  let kategorie = '';
+  const catHit = text.match(/Bioläden|Marktstände|Lieferservice/i);
+  if (catHit) kategorie = catHit[0];
+
+  return {
+    name: name || null,
+    kategorie: kategorie || null,
+    strasse: strasse || null,
+    plz: plz || null,
+    ort: ort || null,
+    telefon: telefon || null,
+    email: email || null,
+    web: web || null,
+    oeffnungszeiten: oeffnungszeiten || null,
+    lat: null,
+    lng: null,
+    sourceZip: String(sourceZip),
+  };
 }
 
-async function scrapeZip(page, zip, radius, dataset) {
-  await navigateForZip(page, zip, radius);
-  // Wait a bit for cards to appear
-  await page.waitForTimeout(800);
-  let total = await countDetailButtons(page).catch(()=>0);
-  Apify.utils.log.info(`DETAILS buttons: ${total}`);
+async function runOnce(browser, zip, radiusKm, dataset, dedupSet) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // Pre-seed URL with query args (helps server-side filter)
+  const url = `https://www.bioladen.de/bio-haendler-suche?tx_biohandel_plg[searchplz]=${zip}&tx_biohandel_plg[distance]=${radiusKm}`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+
+  await setZipAndRadiusAndSearch(page, zip, radiusKm);
+
+  // Collect details buttons
+  const details = await findDetailButtons(page);
+  const total = await details.count();
+  log.info(`DETAILS buttons: ${total}`);
 
   let saved = 0;
   for (let i = 0; i < total; i++) {
-    // Re-query nth Details to keep handles fresh
-    const locator = page.locator('a:has-text("Details"), button:has-text("Details")').nth(i);
-    const exists = await locator.count().catch(()=>0);
-    if (!exists) continue;
-    await locator.scrollIntoViewIfNeeded().catch(()=>{});
-    await locator.click({ timeout: 5000 }).catch(()=>{});
-    // Wait for modal content
-    await page.waitForSelector('.modal.show, .modal[style*="display: block"], [role="dialog"].show', { timeout: 8000 }).catch(()=>{});
-    const data = await extractFromModal(page).catch(()=>null);
-    if (data) {
-      data.source_zip = String(zip);
-      data.source_url = page.url();
-      await dataset.pushData(data);
-      saved++;
+    try {
+      const btn = details.nth(i);
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
+      await btn.click({ timeout: 8000 });
+      const rec = await extractFromOpenModal(page, zip);
+
+      // dedup key by name+strasse+plz
+      const key = [rec.name||'', rec.strasse||'', rec.plz||''].join('|').toLowerCase();
+      if (!dedupSet.has(key)) {
+        dedupSet.add(key);
+        await dataset.pushData(rec);
+        saved++;
+      }
+
+      // Close modal
+      const closeBtn = page.locator('.modal.show button:has-text("Schließen"), .modal.show button.btn-close').first();
+      if (await closeBtn.count()) {
+        await closeBtn.click({ timeout: 3000 }).catch(() => page.keyboard.press('Escape').catch(()=>{}));
+      } else {
+        await page.keyboard.press('Escape').catch(()=>{});
+      }
+      await sleep(120);
+    } catch (e) {
+      // try to recover modal state
+      await page.keyboard.press('Escape').catch(()=>{});
     }
-    await clickCloseModal(page).catch(()=>{});
-    await page.waitForTimeout(120);
   }
-  Apify.utils.log.info(`PLZ ${zip}: ${saved} Datensätze gespeichert`);
+
+  await context.close().catch(()=>{});
+  return saved;
 }
 
-Apify.main(async () => {
-  const input = await Apify.getInput() || {};
-  const radius = Number(input.radius || 50);
-  let zips = Array.isArray(input.zips) && input.zips.length ? input.zips.map(z=>String(z)) : null;
-  if (!zips) {
-    // load from plz_full.json
-    const fs = require('fs');
-    const path = require('path');
-    const p = path.join(__dirname, 'plz_full.json');
-    const content = fs.readFileSync(p, 'utf8');
-    zips = JSON.parse(content);
-  }
-  Apify.utils.log.info(`PLZ in Lauf: ${zips.length} (aus plz_full.json)`);
-
-  const dataset = await Apify.openDataset();
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox','--disable-dev-shm-usage']
-  });
-  const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
-  const page = await context.newPage();
-
-  for (let i=0;i<zips.length;i++) {
-    const zip = zips[i];
-    Apify.utils.log.info(`=== ${i+1}/${zips.length} | PLZ ${zip} ===`);
+await Actor.main(async () => {
+  const input = await Actor.getInput() || {};
+  const radiusKm = Number(input.radiusKm ?? 50);
+  let postalCodes = input.postalCodes;
+  if (!postalCodes) {
     try {
-      await scrapeZip(page, zip, radius, dataset);
-    } catch (err) {
-      Apify.utils.log.warning(`PLZ ${zip} Fehler: ${err && err.message ? err.message : err}`);
+      postalCodes = JSON.parse(await Actor.getValue('plz_full.json'));
+    } catch {
+      postalCodes = null;
     }
+  }
+  if (!postalCodes) {
+    postalCodes = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('./plz_full.json', import.meta.url)));
+  }
+  log.info(`PLZ in Lauf: ${postalCodes.length} (aus plz_full.json)`);
+
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const dataset = await Actor.openDataset();
+  const dedupSet = new Set();
+
+  for (let i = 0; i < postalCodes.length; i++) {
+    const zip = String(postalCodes[i]).padStart(5, '0');
+    log.info(`=== ${i+1}/${postalCodes.length} | PLZ ${zip} ===`);
+    const saved = await runOnce(browser, zip, radiusKm, dataset, dedupSet);
+    log.info(`PLZ ${zip}: ${saved} neue Datensätze gespeichert`);
   }
 
   await browser.close();
-  Apify.utils.log.info('Fertig.');
 });

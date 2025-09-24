@@ -1,15 +1,14 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.1.4",
-  "description": "Extrahiert Bioladen/Weiling-Händler via PLZ-Suche (50km Radius) von bioladen.de.",
+  "version": "4.1.0",
+  "type": "module",
+  "description": "Extrahiert Bioladen-H\u00e4ndler via PLZ+Radius aus bioladen.de",
   "main": "main.js",
   "scripts": {
     "start": "node main.js"
   },
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "apify": "3.4.5",
-    "playwright": "1.55.1"
+    "apify": "^3.4.5",
+    "playwright": "^1.55.1"
   }
 }
