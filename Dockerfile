@@ -1,16 +1,20 @@
 FROM apify/actor-node-playwright-chrome:20
 
+# Install as root, copy manifests first for better caching
 USER root
 WORKDIR /usr/src/app
 
-# Copy manifest files first (own to myuser) and install prod deps as myuser to avoid EACCES
-COPY --chown=myuser:myuser package*.json ./
-USER myuser
+COPY package*.json ./
 RUN npm install --omit=dev --omit=optional --no-audit --no-fund
 
-# Now app sources
-USER root
-COPY --chown=myuser:myuser . ./
+# Copy the app
+COPY . .
+
+# Fix ownership for runtime user
+RUN chown -R myuser:myuser /usr/src/app
+
+# Drop privileges
 USER myuser
 
-CMD ["node","main.js"]
+# Apify wraps with xvfb-run automatically on the platform, just run node
+CMD ["node", "main.js"]

@@ -1,9 +1,9 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.1.0",
-  "type": "module",
-  "description": "Apify Actor: extrahiert Bioladen/Marktstand/Lieferservice-Händlerdetails via Details-Modals",
+  "version": "4.2.0",
+  "description": "Extrahiert Bioläden, Marktstände und Lieferservices von bioladen.de-Händlersuche.",
   "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node main.js"
   },
