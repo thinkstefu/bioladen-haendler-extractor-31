@@ -1,8 +1,8 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.2.0",
+  "version": "4.2.1",
   "type": "module",
-  "description": "Extrahiert Bioladen/Marktstand/Lieferservice-Händler aus der bioladen.de Suche per PLZ und 50 km Radius.",
+  "description": "Extracts Weiling bioladen dealer data by ZIP with 50km radius.",
   "main": "main.js",
   "scripts": {
     "start": "node main.js"
