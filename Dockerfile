@@ -1,19 +1,24 @@
 FROM apify/actor-node-playwright-chrome:20
 
-# Work as root for install, then drop privileges
-USER root
+# Workdir
 WORKDIR /usr/src/app
 
-# Install prod deps (no npm ci to avoid lockfile requirement)
-COPY package*.json ./
-RUN npm install --omit=dev --omit=optional --no-audit --no-fund
+# Install deps as root to avoid EACCES, then switch to myuser
+USER root
 
-# Copy source
-COPY . .
+COPY package*.json ./
+
+# No postinstall, no playwright install needed (base image has browsers)
+RUN npm install --omit=dev --no-audit --no-fund
+
+# Copy app files
+COPY . ./
 
 # Ensure runtime user owns files
 RUN chown -R myuser:myuser /usr/src/app
+
+# Drop privileges
 USER myuser
 
-# Default command
+# Start
 CMD ["node", "main.js"]

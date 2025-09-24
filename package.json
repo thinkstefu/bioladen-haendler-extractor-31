@@ -1,8 +1,9 @@
 {
   "name": "bioladen-haendler-extractor",
   "version": "5.0.0",
-  "type": "commonjs",
+  "description": "Extrahiert Bioläden/Marktstände/Lieferservices aus einer Händlersuche, gesteuert über PLZ-Liste.",
   "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node main.js"
   },
