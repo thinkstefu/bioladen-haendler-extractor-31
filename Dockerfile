@@ -1,24 +1,19 @@
-# Stable Apify base image with Playwright + Chrome preinstalled
 FROM apify/actor-node-playwright-chrome:20
 
-# Workdir
+# Work as root for install to avoid EACCES issues, then drop back to myuser
+USER root
 WORKDIR /usr/src/app
 
-# Copy package manifests first (better layer caching)
+# Install production deps (no npm ci -> no lockfile requirement)
 COPY package*.json ./
+RUN npm install --omit=dev --omit=optional --no-audit --no-fund
 
-# Install dependencies as root to avoid EACCES, then drop privileges
-USER root
-RUN npm ci --omit=dev --omit=optional || npm install --omit=dev --omit=optional --no-audit --no-fund
-
-# Copy the rest of the source
+# Copy source and set permissions
 COPY . .
-
-# Fix ownership for runtime
 RUN chown -R myuser:myuser /usr/src/app
 
-# Switch to non-root user
+# Drop privileges
 USER myuser
 
-# Default command
+# Default command; Apify overrides with xvfb-run automatically
 CMD ["node", "main.js"]

@@ -1,64 +1,42 @@
-# Bioladen Händler Extractor (stabil)
+# bioladen-haendler-extractor (stabil)
 
-Diese Version entspricht funktional der Variante, die dir ~90 Datensätze geliefert hat – mit robusteren Selektoren,
-50-km-Radius erzwungen, allen Kategorien (Bioläden, Marktstände, Lieferservice) sowie Null-Fallbacks für fehlende Felder.
-Zudem ist das Docker-Setup stabil (keine `playwright install`-Probleme, keine `EACCES`-Fehler).
+Stabiler Apify Actor mit Playwright:
+- **Keine** Abhängigkeit von `npm ci` (Build-fail fix).
+- Dockerfile installiert als `root` → keine **EACCES**-Fehler, danach Wechsel zu `myuser`.
+- **Actor.main** (Apify v3) → kein `Apify.main is not a function` mehr.
+- 50 km Radius via **UI** oder **URL-Fallback**.
+- Kategorien **Bioläden / Marktstände / Lieferservice** werden erzwungen (UI / Text / Fallback).
+- **Alle PLZ** aus `plz_full.json` (kann per Input begrenzt werden).
+- Sauberes Output-Schema; fehlende Felder werden als `null` gespeichert.
 
-## Schnellstart (Apify)
-1. Erstelle einen neuen Actor mit diesem Repo (oder ZIP).
-2. **Timeout** in den Run-Optionen auf mind. **60 Minuten** setzen (besser: in Batches laufen).
-3. Input z. B.:
-   ```json
-   {
-     "baseUrl": "https://example.com/haendlersuche",
-     "headless": true,
-     "debug": false,
-     "startIndex": 0,
-     "limit": 500
-   }
-   ```
-   > **Wichtig:** `baseUrl` muss die Trefferliste-Seite sein. Falls sich die Seite ändert, kannst du Selektoren
-   > in `CONFIG.SELECTORS` in `main.js` anpassen.
-
-## Was ist neu/robust?
-- Radius **immer 50 km** (UI + URL-Fallback).
-- **Alle Kategorien** werden aktiv gesetzt.
-- **Pagination** der Trefferliste wird vollständig durchlaufen.
-- Details werden **entweder** per Direktlink (wenn vorhanden) **oder** per Klick/Modal extrahiert.
-- Einheitliches Schema; fehlende Felder werden als `null` gespeichert.
-- Dedup pro Lauf (Hash über Name+Adresse).
-- Dockerfile auf `apify/actor-node-playwright-chrome:20`, Installation als root → keine EACCES-Probleme.
-
-## Input-Parameter
-- `baseUrl` (required): URL der Händlersuche.
-- `headless` (bool, default `true`): Headless-Mode.
-- `debug` (bool, default `false`): Zusätzliche Logs + langsamere Wartezeiten.
-- `startIndex` (int, default `0`): Index in `plz_full.json`.
-- `limit` (int|null): Anzahl PLZs ab `startIndex`. Falls `null`, werden alle ab `startIndex` verarbeitet.
-- `maxConcurrency` (int, default `4`): Parallele Detailseiten (nur bei echten Links).
-- `delayMs` (int, default `200`): leichte Verzögerung zwischen Interaktionen.
-
-## Output-Schema (Beispiel)
+## Input (optional)
 ```json
 {
-  "name": "Bio Musterladen",
-  "street": "Musterstraße 1",
-  "zip": "20095",
-  "city": "Hamburg",
-  "lat": 53.55,
-  "lng": 10.0,
-  "phone": "+49 40 123456",
-  "email": "info@example.de",
-  "website": "https://example.de",
-  "categories": ["Bioladen", "Marktstand"],
-  "openingHoursRaw": "Mo-Fr 9-18, Sa 10-14",
-  "sourceUrl": "https://.../details/123",
-  "plzQuery": "20095",
-  "timestamp": "2025-09-24T12:34:56.000Z"
+  "baseUrl": "https://BEISPIEL.DOMAIN/haendlersuche",
+  "maxZips": 0,
+  "startAt": 0,
+  "pauseMs": 150
 }
 ```
+- **baseUrl**: Trefferlisten-Seite der Händlersuche. Wenn NICHT gesetzt, wird `DEFAULT_BASE_URL` im Code verwendet.
+- **maxZips**: 0 = alle. Zum Testen z. B. 50.
+- **startAt**: Startindex in der PLZ-Liste.
+- **pauseMs**: kleine Pause pro Detail (Stabilität vs. Speed).
 
-## Tipps
-- Große Läufe in **Batches**: z. B. `startIndex=0&limit=500`, dann `500/500`, etc.
-- Bei Strukturänderungen der Website Selektoren in `CONFIG.SELECTORS` anpassen.
-- Setze `debug=true`, um die Step-Logs zu sehen.
+Alternativ über Umgebungsvariablen:
+
+- `BASE_URL` (überschreibt Default)
+- `CONCURRENCY` (derzeit nicht genutzt, vorbereitet)
+- `PAUSE_MS`
+
+## Apify Run-Optionen
+- **Timeout**: mind. **3600 s** (1 h) oder höher.
+- **Memory**: 1024 MB+.
+- **CPU concurrency**: 1 (eine Seite), internes Paging erledigt das Script.
+
+## Hinweise
+- Wenn das UI-Setzen von Radius/PLZ scheitert, wird automatisch eine URL mit Query-Parametern aufgerufen (`plz=XXXXX&radius=50&types=bioladen,markt,liefer`).
+- Die Felder im Datensatz sind: `name, street, zip, city, phone, email, website, opening_hours_raw, categories, source_zip`.
+- Alle Felder sind **nullable**; leere Felder werden als `null` gespeichert.
+
+Viel Erfolg!
