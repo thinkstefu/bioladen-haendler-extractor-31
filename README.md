@@ -1,22 +1,11 @@
 # bioladen-haendler-extractor
 
-Extrahiert Händlerdaten von **bioladen.de** über die Suche (PLZ + Radius 50km). Klickt pro Ergebnis auf **DETAILS** und speichert strukturierte Felder.
+Actor, der die bioladen.de-Händlersuche über PLZ + Radius **50 km** crawlt, alle Kategorien mitnimmt, Modals direkt parst und saubere CSV/JSON ausgibt.
 
-## Input
-Optional via Actor-Input:
-```json
-{
-  "postalCodes": ["20095","80331","50667","60311","70173"],
-  "radiusKm": 50
-}
-```
-Wenn leer, wird `plz_full.json` genutzt.
+## Quickstart (Apify)
+1) Actor aus diesem ZIP bauen (Dockerfile ist enthalten).
+2) `plz_full.json` ggf. mit deiner großen Liste ersetzen.
+3) Run starten – Ergebnisse landen im Dataset.
 
-## Output (Dataset)
-Felder:
-- name, kategorie, strasse, plz, ort, telefon, email, website, oeffnungszeiten, source_plz
-
-## Hinweise
-- Cookie-Banner wird nur einmal akzeptiert.
-- Kategorien **Bioläden**, **Marktstände** und **Lieferservice** werden (falls vorhanden) aktiviert.
-- Radius wird **quer** gesetzt: Query-Parameter, Select-Feld + `change` + Formular-Submit.
+## Spalten
+name, kategorie, strasse, plz, ort, telefon, email, website, oeffnungszeiten, source_plz, source_url, lat, lon
