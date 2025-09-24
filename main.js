@@ -1,273 +1,319 @@
-import { Actor } from 'apify';
+import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
-const BASE = 'https://www.bioladen.de/bio-haendler-suche';
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// helpful wait
-const wait = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function acceptCookiesOnce(page) {
+async function acceptCookies(page) {
   try {
-    // Try multiple known selectors/texts.
-    const buttons = page.locator('button:has-text("Akzeptieren"), button:has-text("Einverstanden"), button:has-text("Zustimmen"), #uc-btn-accept-all, [data-cc="accept"]');
-    if (await buttons.count() > 0) {
-      await buttons.first().click({ timeout: 3000 }).catch(()=>{});
-      await wait(300);
-      Actor.log.info('Cookie-Banner akzeptiert.');
-    }
-  } catch {}
-}
-
-async function ensureCategories(page) {
-  // Try to ensure Bioläden, Marktstände, Lieferservice sind aktiv, falls Checkboxen existieren
-  const labelTexts = ['Bioläden', 'Bioladen', 'Marktstände', 'Marktstand', 'Lieferservice', 'Lieferservices'];
-  for (const t of labelTexts) {
-    const lab = page.locator(`label:has-text("${t}")`);
-    if (await lab.count()) {
-      // click if not already checked (label->input[type=checkbox])
-      const input = lab.first().locator('input[type="checkbox"]');
-      if (await input.count()) {
-        const checked = await input.isChecked().catch(()=>false);
-        if (!checked) await lab.first().click().catch(()=>{});
-      } else {
-        // sometimes just toggle-able buttons
-        await lab.first().click().catch(()=>{});
+    // Try a few common variants
+    const candidates = [
+      'button:has-text("Alle akzeptieren")',
+      'button:has-text("Akzeptieren")',
+      'button:has-text("Zustimmen")',
+      'text=/Alle akzeptieren/i',
+      'text=/Akzeptieren/i',
+    ];
+    for (const sel of candidates) {
+      const el = page.locator(sel).first();
+      if (await el.count()) {
+        await el.click({ timeout: 2000 });
+        log.info('Cookie-Banner akzeptiert.');
+        break;
       }
     }
-  }
+  } catch { /* ignore */ }
 }
 
-async function setZipRadiusAndSearch(page, zip) {
-  // Fülle PLZ
-  const zipSel = 'input[name*="searchplz"], input[name*="[searchplz]"]';
-  await page.waitForSelector(zipSel, { timeout: 15000 });
-  await page.fill(zipSel, '');
-  await page.type(zipSel, String(zip), { delay: 30 });
-
-  // Setze Radius via <select>
-  const distSel = 'select[name*="distance"], select[name*="[distance]"]';
-  await page.waitForSelector(distSel, { timeout: 5000 });
-  await page.selectOption(distSel, { value: '50' }).catch(async () => {
-    // Fallback: set via JS + dispatch change
-    await page.evaluate((sel) => {
-      const el = document.querySelector(sel);
-      if (el) { el.value = '50'; el.dispatchEvent(new Event('change', { bubbles: true })); }
-    }, distSel);
-  });
-
-  // Search submit
-  const form = await page.locator('form').first();
-  if (await form.count()) {
-    // try button with text 'Suchen'
-    const btn = form.locator('button[type="submit"], input[type="submit"], button:has-text("Suchen")');
-    if (await btn.count()) {
-      await btn.first().click().catch(()=>{});
-    } else {
-      // last resort submit via JS
-      await page.evaluate(() => {
-        const f = document.querySelector('form');
-        if (f) f.submit();
-      });
-    }
-  }
-
-  // Warte auf Results oder Hinweis
-  await Promise.race([
-    page.waitForSelector('a:has-text("Details"), button:has-text("Details")', { timeout: 12000 }).catch(()=>{}),
-    page.waitForSelector('text=keine Treffer', { timeout: 12000 }).catch(()=>{}),
-    page.waitForLoadState('networkidle').catch(()=>{}),
-  ]);
-
-  // verify distance really 50 (URL or selected value)
-  const selectedVal = await page.$eval(distSel, el => el && el.value, ).catch(()=>null);
-  if (selectedVal !== '50') {
-    await page.selectOption(distSel, { value: '50' }).catch(()=>{});
-    const btn2 = page.locator('button[type="submit"], input[type="submit"]');
-    if (await btn2.count()) await btn2.first().click().catch(()=>{});
-    await page.waitForLoadState('networkidle').catch(()=>{});
-  }
+function toNull(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
 }
 
-function parseBlockText(txt) {
-  // normalize whitespace
-  return txt.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+function normalizeText(s) {
+  return s?.replace(/[\s\u00A0]+/g, ' ').trim() ?? null;
 }
 
-function parseModalTextToFields(text) {
-  // Initialize fields
-  const out = {
-    name: null,
-    typ: null,
-    strasse: null,
-    plz: null,
-    ort: null,
-    telefon: null,
-    email: null,
-    website: null,
-    oeffnungszeiten: null
-  };
-  const t = text;
-
-  // Try email
-  const email = t.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  if (email) out.email = email[0];
-
-  // Try phone
-  const phone = t.match(/(?:Tel\.?|Telefon)[:\s]*([+0-9][0-9\s\-/()]{5,})/i);
-  if (phone) out.telefon = phone[1].trim();
-
-  // Website: any http(s) link not pointing to bioladen.de (if multiple, take first)
-  const site = t.match(/https?:\/\/[^\s)]+/ig);
-  if (site && site.length) {
-    const first = site.find(u => !/bioladen\.de/i.test(u)) || site[0];
-    out.website = first;
+// heuristic extractors from modal content
+async function parseModal(page) {
+  // Find modal container
+  const modalSel = [
+    'div[role="dialog"]',
+    '.modal[open], .modal.show, .c-modal, .modal',
+    '[aria-modal="true"]'
+  ];
+  let modal;
+  for (const sel of modalSel) {
+    const loc = page.locator(sel).first();
+    if (await loc.count()) { modal = loc; break; }
+  }
+  if (!modal) {
+    // fallback: use visible overlay
+    modal = page.locator('body');
   }
 
-  // Type
-  if (/Lieferservice/i.test(t)) out.typ = 'Lieferservice';
-  else if (/Marktstand/i.test(t)) out.typ = 'Marktstand';
-  else if (/Bioladen/i.test(t)) out.typ = 'Bioladen';
-
-  // Address lines – look for PLZ + Ort pattern
-  const plzOrt = t.match(/\b(\d{5})\s+([A-Za-zÄÖÜäöüß\-\.\s]+)/);
-  if (plzOrt) {
-    out.plz = plzOrt[1];
-    out.ort = plzOrt[2].replace(/[,;].*$/, '').trim();
+  // Prefer structured pieces
+  let name = null;
+  for (const h of ['h1','h2','h3','.modal-title','.c-modal__title']) {
+    const loc = modal.locator(h).first();
+    if (await loc.count()) { name = await loc.innerText().catch(() => null); if (name) break; }
   }
-  // street heuristic: first line before plzOrt containing a number
-  const lines = t.split(/\n+/).map(s => s.trim()).filter(Boolean);
-  let streetCandidate = null;
+
+  // Links
+  const links = await modal.locator('a').all();
+  let phone = null, email = null, website = null;
+  for (const a of links) {
+    const href = (await a.getAttribute('href')) || '';
+    if (href.startsWith('tel:')) phone = href.replace(/^tel:/, '').trim();
+    else if (href.startsWith('mailto:')) email = href.replace(/^mailto:/, '').trim();
+  }
+  // website: prefer http(s) links excluding bioladen.de itself (store may have their own site)
+  for (const a of links) {
+    const href = (await a.getAttribute('href')) || '';
+    if (/^https?:/i.test(href) && !/bioladen\.de/i.test(href)) { website = href.trim(); break; }
+  }
+
+  const text = await modal.innerText().catch(() => '') || '';
+  const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+
+  // Address: try to find line with PLZ
+  let street = null, postalCode = null, city = null;
   for (let i = 0; i < lines.length; i++) {
-    if (plzOrt && lines[i].includes(plzOrt[0])) {
-      // previous non-empty line
+    const m = lines[i].match(/\b(\d{5})\b\s+(.+)/);
+    if (m) {
+      postalCode = m[1];
+      city = m[2].replace(/^(?:D-)?\s*/, '').trim();
+      // street likely previous non-empty
       for (let j = i - 1; j >= 0; j--) {
-        if (/\d+/.test(lines[j])) { streetCandidate = lines[j]; break; }
+        if (lines[j] && !/^(Telefon|Tel\.|E-?Mail|Web|Öffnungszeiten|Mo\.|Di\.|Mi\.|Do\.|Fr\.|Sa\.|So\.)/i.test(lines[j])) {
+          street = lines[j].trim();
+          break;
+        }
       }
       break;
     }
   }
-  out.strasse = streetCandidate || null;
 
-  // Name: try modal title first, else first line not equal to street, not phone/email keywords
-  // (Will be overridden by parseModal() that passes the modal title separately)
-  // Opening hours: grab block around "Öffnungszeiten"
-  const oh = t.split(/\n/).reduce((acc, line) => {
-    if (/Öffnungszeiten/i.test(line)) acc.push(''); // marker
-    else if (acc.length) acc.push(line);
-    return acc;
-  }, []);
-  if (oh && oh.length) {
-    out.oeffnungszeiten = oh.join('\n').trim() || null;
+  // Opening hours: grab contiguous block starting at a day marker
+  let openingHours = null;
+  const dayIdx = lines.findIndex(l => /^Mo\.|^Montag|^Öffnungszeiten/i.test(l));
+  if (dayIdx !== -1) {
+    const oh = [];
+    for (let k = dayIdx; k < lines.length; k++) {
+      const L = lines[k];
+      if (/^(Mo\.|Di\.|Mi\.|Do\.|Fr\.|Sa\.|So\.|Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Öffnungszeiten)/i.test(L)) {
+        oh.push(L);
+      } else if (oh.length) {
+        // stop when the block ends
+        break;
+      }
+    }
+    if (oh.length) openingHours = oh.join(' | ');
   }
 
-  return out;
+  // Try to infer "type" from modal chips or header
+  let type = null;
+  const typeHit = lines.find(l => /(Bioladen|Marktstand|Lieferservice)s?/i.test(l));
+  if (typeHit) {
+    const m = typeHit.match(/(Bioladen|Marktstand|Lieferservice)s?/i);
+    if (m) type = m[1];
+  }
+
+  // Fallback for name: first non-technical line
+  if (!name) {
+    name = lines.find(l => l.length <= 80 && !/^(Telefon|E-?Mail|Web|Öffnungszeiten|\d{5}\b)/i.test(l));
+  }
+
+  return {
+    name: toNull(normalizeText(name)),
+    street: toNull(normalizeText(street)),
+    postalCode: toNull(postalCode),
+    city: toNull(normalizeText(city)),
+    phone: toNull(phone),
+    email: toNull(email),
+    website: toNull(website),
+    openingHours: toNull(normalizeText(openingHours)),
+    type: toNull(type),
+  };
 }
 
-async function extractFromModal(modal) {
-  const rawText = parseBlockText(await modal.innerText());
-  const title = await modal.locator('h2, h3, .modal-title, .card-title').first().innerText().catch(()=>null);
-  const data = parseModalTextToFields(rawText);
-  if (!data.name && title) data.name = title.trim();
-  // Ensure nulls
-  for (const k of Object.keys(data)) if (data[k] === undefined) data[k] = null;
-  return data;
-}
-
-async function processZip(page, zip) {
-  await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
-  await acceptCookiesOnce(page);
-  await ensureCategories(page);
-  await setZipRadiusAndSearch(page, zip);
-
-  // collect all details buttons
-  const details = page.locator('a:has-text("Details"), button:has-text("Details")');
-  const count = await details.count();
-  Actor.log.info(`DETAILS buttons: ${count}`);
-  if (count === 0) return [];
-
+async function clickDetailsAndExtract(page) {
+  // find all "Details" buttons
+  const detailsLoc = page.locator('text=/^\s*Details\s*$/i');
+  const count = await detailsLoc.count();
+  log.info(`DETAILS buttons: ${count}`);
   const results = [];
+
   for (let i = 0; i < count; i++) {
-    // open modal
-    await details.nth(i).click({ trial: false }).catch(()=>{});
+    try {
+      log.info(`→ DETAILS ${i+1}/${count}`);
+      const btn = detailsLoc.nth(i);
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
+      await btn.click({ timeout: 10000 });
 
-    // wait for modal/dialog
-    const modal = page.locator('[role="dialog"], .modal, .modal-dialog').first();
-    await modal.waitFor({ state: 'visible', timeout: 10000 }).catch(()=>{});
+      // wait for some dialog to appear
+      await page.waitForSelector('div[role="dialog"], .modal[open], .modal.show, .c-modal, [aria-modal="true"]', { timeout: 8000 }).catch(() => {});
+      await sleep(250);
 
-    if (await modal.count()) {
-      const item = await extractFromModal(modal);
-      // set source zip
-      item.quelle_plz = String(zip);
-      results.push(item);
-      // close modal
-      // try close button or Esc
-      const closeBtn = modal.locator('button:has-text("Schließen"), button:has-text("Close"), .modal-header button[aria-label*="Close"]');
-      if (await closeBtn.count()) await closeBtn.first().click().catch(()=>{});
-      else await page.keyboard.press('Escape').catch(()=>{});
-      await wait(120);
-    } else {
-      // if no modal appeared, try small wait and continue
-      await wait(200);
+      const rec = await parseModal(page);
+      // ensure nulls for all fields
+      results.push({
+        name: rec.name ?? null,
+        street: rec.street ?? null,
+        postalCode: rec.postalCode ?? null,
+        city: rec.city ?? null,
+        phone: rec.phone ?? null,
+        email: rec.email ?? null,
+        website: rec.website ?? null,
+        openingHours: rec.openingHours ?? null,
+        type: rec.type ?? null,
+      });
+
+      // close modal (Esc and common close selectors)
+      await page.keyboard.press('Escape').catch(() => {});
+      const closeSelectors = [
+        'button:has-text("Schließen")',
+        'button:has-text("Close")',
+        '.modal [data-close], .c-modal__close, .modal .close, [aria-label="Close"]'
+      ];
+      for (const sel of closeSelectors) {
+        const loc = page.locator(sel).first();
+        if (await loc.count()) { await loc.click({ timeout: 1000 }).catch(() => {}); break; }
+      }
+
+      // small gap to prevent dialog race
+      await sleep(150);
+    } catch (err) {
+      log.warning(`DETAILS ${i+1}: ${err?.message || err}`);
+      // Try to ensure modal is closed before next iteration
+      await page.keyboard.press('Escape').catch(() => {});
+      await sleep(150);
     }
   }
   return results;
 }
 
-function dedupe(items) {
-  const seen = new Set();
-  const arr = [];
-  for (const it of items) {
-    const key = [it.name||'', it.strasse||'', it.plz||''].join('|').toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    arr.push(it);
+async function ensureRadius(page, desiredKm) {
+  // Try selecting dropdown (best effort)
+  try {
+    const selects = page.locator('select');
+    const sc = await selects.count();
+    for (let i = 0; i < sc; i++) {
+      const sel = selects.nth(i);
+      const opts = await sel.locator('option').allTextContents();
+      if (opts.some(o => /50\s*km/i.test(o))) {
+        await sel.selectOption({ label: `${desiredKm} km` }).catch(() => {});
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function makeUrl(plz, radiusKm) {
+  const r = Number.isFinite(+radiusKm) ? +radiusKm : 50;
+  // Encode the TYPO3 params safely
+  const params = new URLSearchParams();
+  params.set('tx_biohandel_plg[searchplz]', String(plz));
+  params.set('tx_biohandel_plg[distance]', String(r));
+  return `https://www.bioladen.de/bio-haendler-suche?${params.toString()}`;
+}
+
+async function processZip(page, plz, radiusKm) {
+  const url = makeUrl(plz, radiusKm);
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  await acceptCookies(page);
+  await ensureRadius(page, radiusKm);
+  await page.waitForLoadState('domcontentloaded');
+  await sleep(500);
+
+  // Try to ensure category chips are active by clicking if present (best-effort, non-fatal)
+  const chips = ['Bioladen','Bioläden','Marktstand','Marktstände','Lieferservice','Lieferservices'];
+  for (const label of chips) {
+    try {
+      const chip = page.locator(`text=/${label}/i`).first();
+      if (await chip.count()) {
+        // toggle ON if looks inactive (heuristic: has aria-pressed or class contains 'inactive')
+        const pressed = await chip.getAttribute('aria-pressed').catch(() => null);
+        if (pressed === 'false' || pressed === null) {
+          await chip.click({ timeout: 2000 }).catch(() => {});
+        }
+      }
+    } catch {}
   }
-  return arr;
+
+  // Find details
+  const results = await clickDetailsAndExtract(page);
+  return results;
+}
+
+function makeKey(rec) {
+  return [
+    rec.name || '',
+    rec.street || '',
+    rec.postalCode || '',
+    rec.city || '',
+    rec.phone || '',
+  ].join('|').toLowerCase();
 }
 
 await Actor.main(async () => {
-  const input = await Actor.getInput() || {};
-  let zips = Array.isArray(input.plz) && input.plz.length ? input.plz.map(String) : null;
-  if (!zips) {
-    try {
-      const resp = await Actor.getValue('plz_full.json') || null; // when uploaded to KV
-      if (resp && Array.isArray(resp)) zips = resp.map(String);
-    } catch {}
-  }
-  if (!zips) {
-    // fallback to local file in image
-    zips = JSON.parse(await (await import('node:fs/promises')).readFile('./plz_full.json', 'utf8'));
-  }
+  const radiusKm = Number(process.env.RADIUS_KM || 50);
+  const startIndex = Number(process.env.START_INDEX || 0);
+  const limit = Number(process.env.LIMIT || 0);
+  const headless = String(process.env.HEADLESS || 'true') !== 'false';
 
-  const concurrency = Math.max(1, Math.min( (input.concurrency|0) || 1, 6 ));
-  Actor.log.info(`PLZ in Lauf: ${zips.length}${input.plz ? ' (aus input)' : ' (aus plz_full.json)'}`);
+  const plzPath = path.join(process.cwd(), 'plz_full.json');
+  const plzRaw = JSON.parse(await fs.readFile(plzPath, 'utf8'));
+  const list = Array.isArray(plzRaw) ? plzRaw.map(String) : [];
+  const slice = list.slice(startIndex, limit > 0 ? startIndex + limit : undefined);
 
-  const browser = await chromium.launch({ args: ['--no-sandbox'] });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }});
+  log.info(`PLZ in Lauf: ${slice.length}${limit>0?' (LIMIT aktiv)':''}`);
+
+  const browser = await chromium.launch({ headless });
+  const context = await browser.newContext();
   const page = await context.newPage();
 
-  const all = [];
-  for (const zip of zips) {
-    Actor.log.info(`=== ${all.length+1}/${zips.length} | PLZ ${zip} ===`);
-    const items = await processZip(page, zip).catch(err => { Actor.log.warning(`PLZ ${zip} Fehler: ${err.message}`); return []; });
-    Actor.log.info(`PLZ ${zip}: ${items.length} Datensätze extrahiert`);
-    for (const it of items) all.push(it);
-    // push batch to dataset to avoid data loss
-    if (items.length) await Actor.pushData(items);
-  }
+  const seen = new Set();
+  let totalSaved = 0;
 
-  const unique = dedupe(all).map(it => {
-    // ensure explicit nulls
-    for (const k of ['name','typ','strasse','plz','ort','telefon','email','website','oeffnungszeiten','quelle_plz']) {
-      if (it[k] === undefined) it[k] = null;
+  for (let idx = 0; idx < slice.length; idx++) {
+    const plz = slice[idx];
+    try {
+      log.info(`=== ${idx+1}/${slice.length} | PLZ ${plz} ===`);
+      const rows = await processZip(page, plz, radiusKm);
+
+      // Dedupe + annotate
+      let savedHere = 0;
+      for (const r of rows) {
+        const rec = {
+          name: r.name ?? null,
+          street: r.street ?? null,
+          postalCode: r.postalCode ?? null,
+          city: r.city ?? null,
+          phone: r.phone ?? null,
+          email: r.email ?? null,
+          website: r.website ?? null,
+          openingHours: r.openingHours ?? null,
+          type: r.type ?? null,
+          sourceZip: plz,
+          sourceUrl: makeUrl(plz, radiusKm),
+          scrapedAt: new Date().toISOString(),
+        };
+        const key = makeKey(rec);
+        if (!seen.has(key)) {
+          await Actor.pushData(rec);
+          seen.add(key);
+          totalSaved++;
+          savedHere++;
+        }
+      }
+      log.info(`PLZ ${plz}: ${savedHere} neue Datensätze gespeichert`);
+    } catch (err) {
+      log.warning(`PLZ ${plz} Fehler: ${err?.message || err}`);
     }
-    return it;
-  });
-
-  Actor.log.info(`Fertig. Insgesamt einzigartig gespeichert: ${unique.length}`);
-  if (unique.length) {
-    // store a full copy as a dataset item too (optional)
-    await Actor.setValue('summary.json', unique);
   }
+
   await browser.close();
+  log.info(`Fertig. Insgesamt gespeichert: ${totalSaved}`);
 });

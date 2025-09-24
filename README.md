@@ -1,26 +1,26 @@
-# Bioladen-Händler-Extractor
+# bioladen-haendler-extractor (final)
 
-Extrahiert alle Händler (Bioläden, Marktstände, Lieferservice) von **bioladen.de** anhand einer PLZ-Liste.
-- Radius wird **erzwingend** auf **50 km** gesetzt.
-- Cookie-Banner wird **einmal** akzeptiert.
-- Deduplizierung über `name+strasse+plz`.
-- Fehlt ein Feld → `null`.
-- Ergebnisse landen im Apify Dataset (CSV/JSON verfügbar).
+Stabiler Actor-Stand, der dir bereits ~90 Datensätze geliefert hat – jetzt mit
+- erzwungenem 50-km-Radius (Querystring + optional Dropdown-Fix),
+- robustem Modal-Scraping (Name, Adresse, Telefon, E-Mail, Website, Öffnungszeiten, Typ),
+- Null-Feldern für fehlende Werte,
+- Dedupe (Name+PLZ+Ort+Straße+Telefon),
+- vollständiger `plz_full.json`.
 
-## Input (optional)
-```json
-{
-  "plz": ["20095","80331","50667","60311","70173"],
-  "concurrency": 1
-}
-```
+## Build (Apify)
+- Neues Actor-Build starten; dieses Repo enthält ein eigenes `Dockerfile`.
+- Run-Command: (Standard) `node main.js` – Apify hängt automatisch ein xvfb an.
 
-Wenn `plz` fehlt, wird `plz_full.json` verwendet.
+## Input
+- `plz_full.json` enthält die zu suchenden PLZ. Du kannst optional die Umgebungsvariablen setzen:
+  - `START_INDEX` (0-basiert)
+  - `LIMIT` (Anzahl PLZ aus der Liste)
+  - `RADIUS_KM` (Standard 50)
+  - `HEADLESS` (true/false, default true)
 
-## Build & Run auf Apify
-- Standard Dockerfile nutzt `apify/actor-node-playwright-chrome:20`, Browser ist enthalten.
-- Kein zusätzliches `xvfb-run` nötig.
-- `npm start` → `node main.js`.
-```bash
-npm start
-```
+## Output
+- Datensätze landen in der Default Dataset (Apify). Jedes Feld ist vorhanden, nicht verfügbare als `null`.
+
+## Hinweise
+- Der Actor ruft direkt: `https://www.bioladen.de/bio-haendler-suche?tx_biohandel_plg[searchplz]=<PLZ>&tx_biohandel_plg[distance]=50`
+- Falls kein Ergebnis/keine Buttons: er probiert erneut kurz, dann weiter zur nächsten PLZ.
