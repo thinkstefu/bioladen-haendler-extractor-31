@@ -1,19 +1,21 @@
 FROM apify/actor-node-playwright-chrome:20
 
-# Build as root so npm can write node_modules, then drop privileges.
-USER root
+# Workdir
 WORKDIR /usr/src/app
 
-# Install production deps
+# Copy package manifests first (better layer caching)
 COPY package*.json ./
-RUN npm install --omit=dev --omit=optional --no-audit --no-fund --unsafe-perm
 
-# Copy source
+# Install production deps (as root allowed in this image), then switch to myuser
+RUN npm install --omit=dev --omit=optional --no-audit --no-fund
+
+# Copy rest
 COPY . .
 
-# Fix ownership and switch back to myuser for runtime
+# Ensure permissions for non-root user
 RUN chown -R myuser:myuser /usr/src/app
+
 USER myuser
 
-# Apify adds xvfb-run automatically. Just run Node.
+# Default command (Apify adds its own xvfb wrapper; we keep it simple)
 CMD ["node", "main.js"]

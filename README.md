@@ -1,22 +1,26 @@
 # Bioladen-Händler-Extractor
 
-Playwright + Apify Actor (SDK v3). Reused single page, sets **PLZ** + **Radius 50 km**, clicks cookie-banner nur einmal,
-klickt alle **Details**-Buttons und extrahiert Name, Typ (Bioladen/Marktstand/Lieferservice), Straße, PLZ, Ort, Telefon, E-Mail, Webseite, Öffnungszeiten.
+Extrahiert alle Händler (Bioläden, Marktstände, Lieferservice) von **bioladen.de** anhand einer PLZ-Liste.
+- Radius wird **erzwingend** auf **50 km** gesetzt.
+- Cookie-Banner wird **einmal** akzeptiert.
+- Deduplizierung über `name+strasse+plz`.
+- Fehlt ein Feld → `null`.
+- Ergebnisse landen im Apify Dataset (CSV/JSON verfügbar).
 
-## Start (lokal)
-```bash
-npm install
-node main.js
+## Input (optional)
+```json
+{
+  "plz": ["20095","80331","50667","60311","70173"],
+  "concurrency": 1
+}
 ```
 
-## Auf Apify
-- Dieses Repo als Actor-Source verwenden.
-- `Dockerfile` unverändert lassen (Image installiert Browser und führt `node main.js` aus).
-- Input optional: `{ "plz": ["20095","80331",...], "concurrency": 1 }`
+Wenn `plz` fehlt, wird `plz_full.json` verwendet.
 
-## Dateien
-- `Dockerfile`: robuster Build ohne Permission-Fehler
-- `package.json`: ESM + SDK v3
-- `main.js`: Logik
-- `plz_full.json`: Beispiel-PLZ-Liste (Hamburg, München, Köln, Frankfurt, Stuttgart). Ersetze durch deine 7.9k PLZ.
-
+## Build & Run auf Apify
+- Standard Dockerfile nutzt `apify/actor-node-playwright-chrome:20`, Browser ist enthalten.
+- Kein zusätzliches `xvfb-run` nötig.
+- `npm start` → `node main.js`.
+```bash
+npm start
+```
