@@ -1,8 +1,8 @@
 {
   "name": "bioladen-haendler-extractor",
-  "version": "4.1.0",
-  "description": "Extrahiert Bioladen / Marktstand / Lieferservice-Händler von bioladen.de per PLZ+50km Radius.",
+  "version": "4.2.0",
   "type": "module",
+  "description": "Extrahiert Bioladen/Marktstand/Lieferservice-Händler aus der bioladen.de Suche per PLZ und 50 km Radius.",
   "main": "main.js",
   "scripts": {
     "start": "node main.js"
