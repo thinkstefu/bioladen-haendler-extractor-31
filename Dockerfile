@@ -1,17 +1,24 @@
+# Stable Apify base image with Playwright + Chrome preinstalled
 FROM apify/actor-node-playwright-chrome:20
 
-USER root
+# Workdir
 WORKDIR /usr/src/app
-RUN mkdir -p /usr/src/app && chown -R myuser:myuser /usr/src/app
 
-ENV NPM_CONFIG_CACHE=/home/myuser/.npm
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# Copy package manifests first (better layer caching)
+COPY package*.json ./
 
-COPY --chown=myuser:myuser package*.json ./
+# Install dependencies as root to avoid EACCES, then drop privileges
+USER root
+RUN npm ci --omit=dev --omit=optional || npm install --omit=dev --omit=optional --no-audit --no-fund
+
+# Copy the rest of the source
+COPY . .
+
+# Fix ownership for runtime
+RUN chown -R myuser:myuser /usr/src/app
+
+# Switch to non-root user
 USER myuser
-RUN npm ci --omit=dev --omit=optional --no-audit --no-fund || \
-    npm install --omit=dev --omit=optional --no-audit --no-fund
 
-COPY --chown=myuser:myuser . .
-
+# Default command
 CMD ["node", "main.js"]
