@@ -1,42 +1,41 @@
-# bioladen-haendler-extractor (stabil)
+# Bioladen-Händler-Extractor (stabiler Build)
 
-Stabiler Apify Actor mit Playwright:
-- **Keine** Abhängigkeit von `npm ci` (Build-fail fix).
-- Dockerfile installiert als `root` → keine **EACCES**-Fehler, danach Wechsel zu `myuser`.
-- **Actor.main** (Apify v3) → kein `Apify.main is not a function` mehr.
-- 50 km Radius via **UI** oder **URL-Fallback**.
-- Kategorien **Bioläden / Marktstände / Lieferservice** werden erzwungen (UI / Text / Fallback).
-- **Alle PLZ** aus `plz_full.json` (kann per Input begrenzt werden).
-- Sauberes Output-Schema; fehlende Felder werden als `null` gespeichert.
+Dieses Paket ist so gebaut, dass es ohne zusätzliche Playwright-Installs läuft
+(Base-Image `apify/actor-node-playwright-chrome:20`). Es nutzt Apify v3
+korrekt mit `Actor.main` und setzt den Umkreis auf 50 km per UI, mit
+robustem URL-Fallback.
 
-## Input (optional)
-```json
-{
-  "baseUrl": "https://BEISPIEL.DOMAIN/haendlersuche",
-  "maxZips": 0,
-  "startAt": 0,
-  "pauseMs": 150
-}
-```
-- **baseUrl**: Trefferlisten-Seite der Händlersuche. Wenn NICHT gesetzt, wird `DEFAULT_BASE_URL` im Code verwendet.
-- **maxZips**: 0 = alle. Zum Testen z. B. 50.
-- **startAt**: Startindex in der PLZ-Liste.
-- **pauseMs**: kleine Pause pro Detail (Stabilität vs. Speed).
+## Start (Apify)
+- **Optionaler Input (JSON):**
+  ```json
+  {
+    "baseUrl": "https://DEINE-HAENDLERSUCHE-URL",
+    "startAt": 0,
+    "maxZips": 200,
+    "slowMode": false
+  }
+  ```
+  Wenn `baseUrl` nicht gesetzt ist, wird ein **Default** genutzt. Trage hier am besten die
+  Trefferlisten-Seite deiner Händlersuche ein.
 
-Alternativ über Umgebungsvariablen:
-
-- `BASE_URL` (überschreibt Default)
-- `CONCURRENCY` (derzeit nicht genutzt, vorbereitet)
-- `PAUSE_MS`
-
-## Apify Run-Optionen
-- **Timeout**: mind. **3600 s** (1 h) oder höher.
-- **Memory**: 1024 MB+.
-- **CPU concurrency**: 1 (eine Seite), internes Paging erledigt das Script.
+- **Run options:**
+  - Timeout: mind. 1h für große Läufe
+  - Memory: 2048 MB oder mehr (je nach Umfang)
 
 ## Hinweise
-- Wenn das UI-Setzen von Radius/PLZ scheitert, wird automatisch eine URL mit Query-Parametern aufgerufen (`plz=XXXXX&radius=50&types=bioladen,markt,liefer`).
-- Die Felder im Datensatz sind: `name, street, zip, city, phone, email, website, opening_hours_raw, categories, source_zip`.
-- Alle Felder sind **nullable**; leere Felder werden als `null` gespeichert.
+- Der Actor interagiert zuerst per UI (PLZ tippen, Radius 50 km wählen, Kategorien setzen).
+  Wenn das scheitert, versucht er **mehrere** URL-Varianten:
+  `?plz=XXXXX&radius=50`, `?zip=XXXXX&distance=50`, `?postalCode=XXXXX&umkreis=50`.
+- Wenn für eine PLZ **0 Treffer** festgestellt werden, wird ein **Screenshot** gespeichert.
+- Alle Felder sind **null-sicher**; wenn etwas nicht gefunden wird, landet `null` in der Spalte.
+- Selektoren sind zentral in `SELECTORS` definierbar.
 
-Viel Erfolg!
+## Output
+- Datensätze werden in das Standard-Apify-Dataset geschrieben.
+- Screenshots landen im Key-Value Store (nur bei Debug/Fehlerfällen).
+
+## Bekannte Ursachen für „0 Ergebnisse“
+- Falsche/abweichende Parameternamen im Fallback (daher mehrere Varianten implementiert)
+- Die Seite verlangt **Geocoding** durch Enter-Auswahl (UI-Modus kümmert sich darum)
+- Lazy Loading der Liste (wir scrollen + warten)
+- Rate-Limits/Anti-Bot (wir haben Delays/Retry-Strategie eingebaut)

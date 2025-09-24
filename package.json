@@ -1,8 +1,8 @@
 {
   "name": "bioladen-haendler-extractor",
   "version": "5.0.0",
-  "description": "Extrahiert Bioläden / Marktstände / Lieferservice über eine Händlersuche mit Playwright + Apify.",
-  "type": "module",
+  "type": "commonjs",
+  "main": "main.js",
   "scripts": {
     "start": "node main.js"
   },
